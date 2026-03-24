@@ -1,0 +1,34 @@
+# ==============================================================================
+# COMPOSITE ACTION: Setup MySQL
+# ==============================================================================
+name: Setup MySQL
+description: Start the pre-installed MySQL service, create a database, and tune for CI
+
+inputs:
+    db-password:
+        description: MySQL root password
+        required: true
+    db-name:
+        description: Database name to create
+        required: true
+
+runs:
+    using: composite
+    steps:
+        -   name: Configure and start MySQL
+            shell: bash
+            run: |
+                # Write CI-optimised config before starting
+                sudo tee /etc/mysql/mysql.conf.d/ci.cnf > /dev/null <<CONF
+                [mysqld]
+                innodb_flush_log_at_trx_commit=0
+                sync_binlog=0
+                max_connections=500
+                table_open_cache=8000
+                table_definition_cache=4000
+                CONF
+
+                sudo systemctl start mysql
+
+                mysql -uroot -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${{ inputs.db-password }}';"
+                mysql -uroot -p"${{ inputs.db-password }}" -e "CREATE DATABASE IF NOT EXISTS \`${{ inputs.db-name }}\`;"

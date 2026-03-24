@@ -1,0 +1,31 @@
+# ==============================================================================
+# COMPOSITE ACTION: Setup Laravel
+# ==============================================================================
+name: Setup Laravel
+description: Run migrations, optionally seed and dump schema, and optimize the application
+
+inputs:
+    seed:
+        description: Run database seeders
+        required: false
+        default: 'false'
+    schema-dump:
+        description: Dump schema for parallel test DB creation
+        required: false
+        default: 'false'
+
+runs:
+    using: composite
+    steps:
+        -   name: Run migrations
+            shell: bash
+            run: php artisan migrate ${{ inputs.seed == 'true' && '--seed' || '' }} --force
+
+        -   name: Dump DB schema
+            if: ${{ inputs.schema-dump == 'true' }}
+            shell: bash
+            run: php artisan schema:dump --prune
+
+        -   name: Optimize Laravel
+            shell: bash
+            run: php artisan optimize
