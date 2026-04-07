@@ -1,0 +1,77 @@
+# ==============================================================================
+# PHP TESTS
+# ==============================================================================
+# Shared workflow for PHP test pipelines across Sine Macula repositories.
+#
+# Consuming repositories should define their own trigger workflow that calls
+# this one via `workflow_call`, passing any repo-specific inputs.
+# ==============================================================================
+name: PHP Tests
+
+# ==============================================================================
+# TRIGGERS
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            php-versions:
+                description: 'JSON array of PHP versions to test against.'
+                type: string
+                default: '["8.3"]'
+            php-extensions:
+                description: 'Comma-separated list of PHP extensions to install.'
+                type: string
+                default: ''
+        secrets:
+            QLTY_COVERAGE_TOKEN:
+                description: 'Qlty coverage token used to publish coverage reports on the default branch.'
+                required: true
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: read
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: TESTS
+    # ==========================================================================
+    tests:
+        name: Test / PHP ${{ matrix.php }}
+        runs-on: ubuntu-latest
+
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php-versions) }}
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v5
+                with:
+                    persist-credentials: false
+
+            -   name: Setup PHP
+                uses: sinemacula/.github/.github/actions/setup-php@v1
+                with:
+                    php-version: ${{ matrix.php }}
+                    extensions: ${{ inputs.php-extensions }}
+
+            -   name: PHPUnit
+                run: composer test-coverage
+
+            -   name: Publish code coverage
+                if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+                uses: qltysh/qlty-action/coverage@v2
+                with:
+                    token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
+                    files: clover.xml
