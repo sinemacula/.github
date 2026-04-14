@@ -1,0 +1,31 @@
+# ==============================================================================
+# COMPOSITE ACTION: Setup PostgreSQL
+# ==============================================================================
+name: Setup PostgreSQL
+description: Start the pre-installed PostgreSQL service, create a database, and tune for CI
+
+inputs:
+    db-password:
+        description: PostgreSQL postgres user password
+        required: true
+    db-name:
+        description: Database name to create
+        required: true
+
+runs:
+    using: composite
+    steps:
+        -   name: Configure and start PostgreSQL
+            shell: bash
+            run: |
+                # Apply CI-optimised config before starting (pg_conftool edits postgresql.conf safely)
+                sudo pg_conftool set fsync off
+                sudo pg_conftool set synchronous_commit off
+                sudo pg_conftool set full_page_writes off
+                sudo pg_conftool set max_connections 500
+
+                sudo systemctl start postgresql
+
+                sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER USER postgres WITH PASSWORD '${{ inputs.db-password }}';"
+                sudo -u postgres psql -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname = '${{ inputs.db-name }}'" | grep -q 1 \
+                    || sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${{ inputs.db-name }}\";"
