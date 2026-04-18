@@ -22,6 +22,12 @@ runs:
                 sudo pg_conftool set fsync off
                 sudo pg_conftool set synchronous_commit off
                 sudo pg_conftool set full_page_writes off
+                sudo pg_conftool set wal_level minimal
+                sudo pg_conftool set max_wal_senders 0
+                sudo pg_conftool set max_wal_size 4GB
+                sudo pg_conftool set checkpoint_timeout 30min
+                sudo pg_conftool set shared_buffers 1GB
+                sudo pg_conftool set autovacuum off
                 sudo pg_conftool set max_connections 500
 
                 sudo systemctl start postgresql

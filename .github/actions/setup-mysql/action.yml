@@ -21,7 +21,11 @@ runs:
                 # Write CI-optimised config before starting
                 sudo tee /etc/mysql/mysql.conf.d/ci.cnf > /dev/null <<CONF
                 [mysqld]
+                disable-log-bin
                 innodb_flush_log_at_trx_commit=0
+                innodb_doublewrite=0
+                innodb_flush_method=O_DIRECT_NO_FSYNC
+                innodb_buffer_pool_size=1G
                 sync_binlog=0
                 max_connections=500
                 table_open_cache=8000
