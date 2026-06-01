@@ -32,6 +32,8 @@ runs:
 
                 sudo systemctl start postgresql
 
-                sudo -u postgres psql -v ON_ERROR_STOP=1 -c "ALTER USER postgres WITH PASSWORD '${{ inputs.db-password }}';"
-                sudo -u postgres psql -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname = '${{ inputs.db-name }}'" | grep -q 1 \
+                sudo -u postgres psql -v ON_ERROR_STOP=1 \
+                    -c "ALTER USER postgres WITH PASSWORD '${{ inputs.db-password }}';"
+                sudo -u postgres psql -v ON_ERROR_STOP=1 \
+                    -tc "SELECT 1 FROM pg_database WHERE datname = '${{ inputs.db-name }}'" | grep -q 1 \
                     || sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${{ inputs.db-name }}\";"

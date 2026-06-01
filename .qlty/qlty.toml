@@ -1,0 +1,53 @@
+# Reference: https://qlty.sh/d/qlty-toml
+config_version = "0"
+
+exclude_patterns = [
+    "**/.archived/**",
+    "**/node_modules/**",
+    "**/vendor/**",
+    "*_min.*",
+    "*-min.*",
+    "*.min.*",
+]
+
+[[source]]
+name = "default"
+default = true
+
+[[source]]
+name = "sinemacula"
+repository = "https://github.com/sinemacula/coding-standards"
+tag = "v1.0.4"
+
+[[plugin]]
+name = "markdownlint"
+mode = "comment"
+
+[[plugin]]
+name = "yamllint"
+
+[[plugin]]
+name = "actionlint"
+
+[[plugin]]
+name = "shellcheck"
+
+[[plugin]]
+name = "shfmt"
+mode = "comment"
+
+[[plugin]]
+name = "editorconfig-checker"
+
+[[plugin]]
+name = "osv-scanner"
+
+[[plugin]]
+name = "trivy"
+drivers = [
+    "config",
+    "fs-vuln",
+]
+
+[[plugin]]
+name = "trufflehog"

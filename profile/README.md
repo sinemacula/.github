@@ -1,14 +1,28 @@
-<p align="center"><a href="https://sinemacula.co.uk" target="_blank"><img src="https://raw.githubusercontent.com/sinemacula/art/master/logo-type/5%20SVG/2%20RGB/1%20Full%20Color/logo-type-rgb-blue.svg" width="300"></a></p>
+<h1 align="center">
+  <a href="https://sinemacula.co.uk" target="_blank">
+    <!-- markdownlint-disable-next-line MD013 -->
+    <img src="https://raw.githubusercontent.com/sinemacula/art/master/logo-type/5%20SVG/2%20RGB/1%20Full%20Color/logo-type-rgb-blue.svg" alt="Sine Macula" width="300">
+  </a>
+</h1>
+
+<p align="center">
+  <strong>Without blemish — flawless execution in startup consulting, engineering, and enterprise scaling.</strong>
+</p>
+
+---
 
 ## About Sine Macula
 
-At Sine Macula, we are dedicated to elevating startups and scaling enterprises to their highest potential. Our name,
-meaning 'without blemish', encapsulates our commitment to flawless execution in startup consulting, engineering, and
-enterprise-level scaling. We believe in crafting solutions that are not only effective but also impeccably delivered.
+At Sine Macula, we are dedicated to elevating startups and scaling enterprises to their highest potential. Our
+name, meaning 'without blemish', encapsulates our commitment to flawless execution in startup consulting,
+engineering, and enterprise-level scaling. We believe in crafting solutions that are not only effective but
+also impeccably delivered.
+
+## What We Do
 
 ### Startup Consulting
 
-Our approach to startup consulting is holistic and tailored. We provide:
+A holistic and tailored approach to getting startups off the ground:
 
 - **Strategic Planning** - Guiding startups with clear, actionable strategies for growth and development.
 - **Market Analysis** - Offering deep insights into market trends to position your startup ahead of the curve.
@@ -16,7 +30,7 @@ Our approach to startup consulting is holistic and tailored. We provide:
 
 ### Engineering Excellence
 
-Engineering is at the heart of what we do. Our services include:
+Engineering is at the heart of what we do:
 
 - **Product Development** - Building cutting-edge products with a focus on scalability and user experience.
 - **Technical Architecture** - Designing robust architectures that support your growing business needs.
@@ -24,7 +38,7 @@ Engineering is at the heart of what we do. Our services include:
 
 ### Enterprise Scaling
 
-For enterprises looking to scale, we offer:
+For enterprises looking to scale:
 
 - **System Optimization** - Enhancing your existing systems for optimal performance and scalability.
 - **Process Automation** - Streamlining processes to increase efficiency and reduce costs.
@@ -32,11 +46,15 @@ For enterprises looking to scale, we offer:
 
 ### Product Strategy
 
-Our approach to product strategy is comprehensive and forward-thinking:
+A comprehensive and forward-thinking approach to product:
 
-- **Vision and Roadmapping** - Defining a clear vision and creating roadmaps that align with your business objectives.
+- **Vision and Roadmapping** - Defining a clear vision and creating roadmaps that align with your objectives.
 - **Market Positioning** - Analyzing market trends to position your product effectively against competitors.
 - **Lifecycle Management** - Managing the product lifecycle to maximize value delivery at every stage.
 
-Sine Macula is not just about delivering solutions; we are about creating seamless, efficient experiences that epitomize
-excellence and precision.
+---
+
+<p align="center">
+  <em>Sine Macula is not just about delivering solutions; we create seamless, efficient experiences that
+  epitomize excellence and precision.</em>
+</p>
