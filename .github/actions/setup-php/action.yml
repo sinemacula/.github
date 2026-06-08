@@ -14,13 +14,16 @@ inputs:
         required: false
         default: ''
     composer-token:
-        description: GitHub OAuth token for Composer (optional, for private packages). Ignored when app-id is set.
+        description: GitHub OAuth token for Composer (optional, for private packages). Ignored when client-id or app-id is set.
+        required: false
+    client-id:
+        description: GitHub App Client ID used to mint a short-lived installation token for private packages (optional, preferred over app-id per GitHub guidance)
         required: false
     app-id:
-        description: GitHub App ID used to mint a short-lived installation token for private packages (optional, preferred over composer-token)
+        description: GitHub App ID used to mint a short-lived installation token for private packages (optional alternative to client-id)
         required: false
     app-private-key:
-        description: GitHub App private key (PEM) paired with app-id (optional, required when app-id is set)
+        description: GitHub App private key (PEM) paired with client-id or app-id (required when either is set)
         required: false
 
 runs:
@@ -36,9 +39,10 @@ runs:
 
         -   name: Mint installation token
             id: app-token
-            if: ${{ inputs.app-id != '' }}
+            if: ${{ inputs.client-id != '' || inputs.app-id != '' }}
             uses: actions/create-github-app-token@v3
             with:
+                client-id: ${{ inputs.client-id }}
                 app-id: ${{ inputs.app-id }}
                 private-key: ${{ inputs.app-private-key }}
                 owner: ${{ github.repository_owner }}
