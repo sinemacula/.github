@@ -14,7 +14,13 @@ inputs:
         required: false
         default: ''
     composer-token:
-        description: GitHub OAuth token for Composer (optional, for private packages)
+        description: GitHub OAuth token for Composer (optional, for private packages). Ignored when app-id is set.
+        required: false
+    app-id:
+        description: GitHub App ID used to mint a short-lived installation token for private packages (optional, preferred over composer-token)
+        required: false
+    app-private-key:
+        description: GitHub App private key (PEM) paired with app-id (optional, required when app-id is set)
         required: false
 
 runs:
@@ -28,6 +34,15 @@ runs:
                 coverage: pcov
                 tools: composer
 
+        -   name: Mint installation token
+            id: app-token
+            if: ${{ inputs.app-id != '' }}
+            uses: actions/create-github-app-token@v3
+            with:
+                app-id: ${{ inputs.app-id }}
+                private-key: ${{ inputs.app-private-key }}
+                owner: ${{ github.repository_owner }}
+
         -   name: Cache dependencies
             uses: actions/cache@v5
             with:
@@ -39,8 +54,10 @@ runs:
 
         -   name: Install Composer dependencies
             shell: bash
+            env:
+                COMPOSER_AUTH_TOKEN: ${{ steps.app-token.outputs.token || inputs.composer-token }}
             run: |
-                if [ -n "${{ inputs.composer-token }}" ]; then
-                    export COMPOSER_AUTH='{"github-oauth": {"github.com": "${{ inputs.composer-token }}"}}'
+                if [ -n "$COMPOSER_AUTH_TOKEN" ]; then
+                    export COMPOSER_AUTH="{\"github-oauth\": {\"github.com\": \"${COMPOSER_AUTH_TOKEN}\"}}"
                 fi
                 composer install --prefer-dist --no-interaction --no-progress
