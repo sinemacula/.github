@@ -34,7 +34,10 @@ on:
                 required: false
                 default: master
             use-app-token:
-                description: Mint a GitHub App token so the Release PR and release tag can trigger downstream workflows (set true for repos whose tag fires an artifact/deploy pipeline)
+                description: >-
+                    Mint a GitHub App token so the Release PR and release tag can trigger
+                    downstream workflows (set true for repos whose tag fires an
+                    artifact/deploy pipeline)
                 type: boolean
                 required: false
                 default: false
