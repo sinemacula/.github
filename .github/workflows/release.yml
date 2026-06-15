@@ -1,0 +1,81 @@
+# ==============================================================================
+# REUSABLE WORKFLOW: Release
+# ==============================================================================
+# Trunk-based release automation via release-please. The calling repository
+# owns its `release-please-config.json` + `.release-please-manifest.json`; this
+# workflow simply runs release-please against them.
+#
+# Behaviour:
+#   - On every push to the tracked branch, release-please opens/updates a single
+#     standing "Release PR" that accumulates the version bump + CHANGELOG.
+#   - Merging that Release PR creates the git tag + GitHub Release.
+#
+# Auth:
+#   - Default: the automatic GITHUB_TOKEN (zero setup) — sufficient for repos
+#     whose tag is consumed out-of-band (e.g. Packagist/npm webhooks).
+#   - use-app-token: true mints a GitHub App token so the Release PR and the
+#     release tag can TRIGGER downstream workflows (required when the tag fires
+#     an artifact/deploy pipeline). The org must expose these secrets and the
+#     caller must forward them with `secrets: inherit`:
+#       RELEASE_APP_ID           — GitHub App ID (or Client ID)
+#       RELEASE_APP_PRIVATE_KEY  — GitHub App private key (PEM)
+# ==============================================================================
+name: Release
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            target-branch:
+                description: The branch release-please tracks and releases from
+                type: string
+                required: false
+                default: master
+            use-app-token:
+                description: Mint a GitHub App token so the Release PR and release tag can trigger downstream workflows (set true for repos whose tag fires an artifact/deploy pipeline)
+                type: boolean
+                required: false
+                default: false
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: write
+    pull-requests: write
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: RELEASE PLEASE
+    # ==========================================================================
+    release:
+        name: Release Please
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Mint app token
+                id: app-token
+                if: ${{ inputs.use-app-token }}
+                uses: actions/create-github-app-token@v3
+                with:
+                    app-id: ${{ secrets.RELEASE_APP_ID }}
+                    private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+                    owner: ${{ github.repository_owner }}
+
+            -   name: Release Please
+                uses: googleapis/release-please-action@v4
+                with:
+                    token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+                    config-file: release-please-config.json
+                    manifest-file: .release-please-manifest.json
+                    target-branch: ${{ inputs.target-branch }}
