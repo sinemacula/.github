@@ -113,7 +113,7 @@ jobs:
                     owner: ${{ github.repository_owner }}
 
             -   name: Release Please
-                uses: googleapis/release-please-action@v4
+                uses: googleapis/release-please-action@v5
                 with:
                     token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
                     release-type: ${{ inputs.release-type }}
