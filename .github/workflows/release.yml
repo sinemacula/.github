@@ -1,0 +1,121 @@
+# ==============================================================================
+# REUSABLE WORKFLOW: Release
+# ==============================================================================
+# Trunk-based release automation via release-please. There are no per-repo
+# config files: behaviour comes from release-please's built-in defaults plus the
+# `release-type` input, and the version is derived from the latest git tag.
+#
+# Behaviour:
+#   - On every push to the tracked branch, release-please opens/updates a single
+#     standing "Release PR" that accumulates the version bump + CHANGELOG.
+#   - Merging that Release PR creates the git tag + GitHub Release.
+#   - Maintenance / hotfix lines: call this with `target-branch` set to the
+#     branch (e.g. a `hotfix/1.4.x` cut from a tag). Each branch keeps its own
+#     Release PR and version line, derived from that branch's latest reachable
+#     tag — nothing else needs configuring.
+#
+# Inputs:
+#   - target-branch        Branch release-please tracks / releases from (default master).
+#   - release-type         release-please strategy: simple (libs + apps), node, php, …
+#                          (default simple — CHANGELOG + tag, no version file).
+#   - versioning-strategy  default | always-bump-patch | … (default default). Use
+#                          always-bump-patch for deployed apps so the version does
+#                          not inflate from frequent feature releases.
+#   - use-app-token        Mint a GitHub App token instead of GITHUB_TOKEN (see Auth).
+#
+# Auth:
+#   - Default: the automatic GITHUB_TOKEN — fine for repos whose tag is consumed
+#     out-of-band (e.g. Packagist/npm webhooks). NOTE: this requires the org/repo
+#     to (a) grant the token write access and (b) allow GitHub Actions to create
+#     pull requests; both are off by default in hardened orgs.
+#   - use-app-token: true mints a GitHub App token so the Release PR and the
+#     release tag can TRIGGER downstream workflows (required when the tag fires
+#     an artifact/deploy pipeline). It also bypasses the GITHUB_TOKEN
+#     PR-creation restriction. The org must expose these secrets and the caller
+#     must forward them with `secrets: inherit`:
+#       RELEASE_APP_CLIENT_ID    — GitHub App Client ID
+#       RELEASE_APP_PRIVATE_KEY  — GitHub App private key (PEM)
+# ==============================================================================
+name: Release
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            target-branch:
+                description: The branch release-please tracks and releases from
+                type: string
+                required: false
+                default: master
+            release-type:
+                description: release-please release strategy (e.g. simple, node, php)
+                type: string
+                required: false
+                default: simple
+            versioning-strategy:
+                description: >-
+                    Version bump strategy (default, always-bump-patch, …); use
+                    always-bump-patch for deployed apps so versions don't inflate
+                type: string
+                required: false
+                default: default
+            use-app-token:
+                description: >-
+                    Mint a GitHub App token so the Release PR and release tag can trigger
+                    downstream workflows (set true for repos whose tag fires an
+                    artifact/deploy pipeline)
+                type: boolean
+                required: false
+                default: false
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: write
+    pull-requests: write
+
+# ==============================================================================
+# CONCURRENCY
+# ==============================================================================
+# Serialise release runs per branch so rapid pushes can't race on the standing
+# Release PR. Never cancel in-flight runs — one may be cutting a tag/release.
+concurrency:
+    group: release-please-${{ inputs.target-branch }}
+    cancel-in-progress: false
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: RELEASE PLEASE
+    # ==========================================================================
+    release:
+        name: Release Please
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Mint app token
+                id: app-token
+                if: ${{ inputs.use-app-token }}
+                uses: actions/create-github-app-token@v3
+                with:
+                    client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+                    private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+                    owner: ${{ github.repository_owner }}
+
+            -   name: Release Please
+                uses: googleapis/release-please-action@v5
+                with:
+                    token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+                    release-type: ${{ inputs.release-type }}
+                    versioning-strategy: ${{ inputs.versioning-strategy }}
+                    target-branch: ${{ inputs.target-branch }}

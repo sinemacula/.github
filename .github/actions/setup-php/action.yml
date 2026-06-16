@@ -1,0 +1,67 @@
+# ==============================================================================
+# COMPOSITE ACTION: Setup PHP
+# ==============================================================================
+name: Setup PHP
+description: Install PHP with pcov coverage, configure dependency caching, and install Composer packages
+
+inputs:
+    php-version:
+        description: PHP version to install
+        required: false
+        default: '8.3'
+    extensions:
+        description: PHP extensions to install (comma-separated)
+        required: false
+        default: ''
+    composer-token:
+        description: GitHub OAuth token for Composer (optional, for private packages). Ignored when client-id or app-id is set.
+        required: false
+    client-id:
+        description: GitHub App Client ID used to mint a short-lived installation token for private packages (optional, preferred over app-id per GitHub guidance)
+        required: false
+    app-id:
+        description: GitHub App ID used to mint a short-lived installation token for private packages (optional alternative to client-id)
+        required: false
+    app-private-key:
+        description: GitHub App private key (PEM) paired with client-id or app-id (required when either is set)
+        required: false
+
+runs:
+    using: composite
+    steps:
+        -   name: Setup PHP
+            uses: shivammathur/setup-php@v2
+            with:
+                php-version: ${{ inputs.php-version }}
+                extensions: ${{ inputs.extensions }}
+                coverage: pcov
+                tools: composer
+
+        -   name: Mint installation token
+            id: app-token
+            if: ${{ inputs.client-id != '' || inputs.app-id != '' }}
+            uses: actions/create-github-app-token@v3
+            with:
+                client-id: ${{ inputs.client-id }}
+                app-id: ${{ inputs.app-id }}
+                private-key: ${{ inputs.app-private-key }}
+                owner: ${{ github.repository_owner }}
+
+        -   name: Cache dependencies
+            uses: actions/cache@v5
+            with:
+                path: |
+                    ~/.composer/cache
+                    vendor
+                key: deps-${{ runner.os }}-php${{ inputs.php-version }}-${{ hashFiles('**/composer.lock') }}
+                restore-keys: deps-${{ runner.os }}-php${{ inputs.php-version }}-
+
+        -   name: Install Composer dependencies
+            shell: bash
+            env:
+                COMPOSER_AUTH_TOKEN: ${{ steps.app-token.outputs.token || inputs.composer-token }}
+            run: |
+                if [ -n "$COMPOSER_AUTH_TOKEN" ]; then
+                    export COMPOSER_AUTH="{\"github-oauth\": {\"github.com\": \"${COMPOSER_AUTH_TOKEN}\"}}"
+                fi
+                composer install --prefer-dist --no-interaction --no-progress
