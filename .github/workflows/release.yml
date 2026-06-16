@@ -33,7 +33,7 @@
 #     an artifact/deploy pipeline). It also bypasses the GITHUB_TOKEN
 #     PR-creation restriction. The org must expose these secrets and the caller
 #     must forward them with `secrets: inherit`:
-#       RELEASE_APP_ID           — GitHub App ID (numeric)
+#       RELEASE_APP_CLIENT_ID    — GitHub App Client ID
 #       RELEASE_APP_PRIVATE_KEY  — GitHub App private key (PEM)
 # ==============================================================================
 name: Release
@@ -108,7 +108,7 @@ jobs:
                 if: ${{ inputs.use-app-token }}
                 uses: actions/create-github-app-token@v3
                 with:
-                    app-id: ${{ secrets.RELEASE_APP_ID }}
+                    client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
                     private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
                     owner: ${{ github.repository_owner }}
 
