@@ -1,0 +1,55 @@
+# ==============================================================================
+# PR TITLE LINT
+# ==============================================================================
+# Validates pull request titles against the Conventional Commits spec. Runs
+# directly on target repositories as an org-wide ruleset "Require workflows"
+# rule, hence a standalone pull_request trigger rather than workflow_call. The
+# allowed types mirror the release-please changelog configuration exactly.
+# ==============================================================================
+name: PR Title Lint
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    pull_request:
+        types: [ opened, edited, reopened, synchronize ]
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    pull-requests: read
+
+jobs:
+
+    # ==========================================================================
+    # JOB: LINT PR TITLE
+    # ==========================================================================
+    lint:
+        name: Conventional Commits
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Validate PR title
+                uses: amannn/action-semantic-pull-request@v5
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                with:
+                    requireScope: false
+                    subjectPattern: ^(?![A-Z]).+$
+                    subjectPatternError: >-
+                        The subject must start with a lowercase letter
+                        (e.g. "feat: add widget", not "feat: Add widget").
+                    types: |
+                        feat
+                        fix
+                        perf
+                        refactor
+                        revert
+                        docs
+                        build
+                        ci
+                        chore
+                        style
+                        test
