@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/sinemacula/.github/compare/v1.5.0...v1.6.0) (2026-07-16)
+
+
+### Features
+
+* add reusable Node test and quality-gate workflows ([#25](https://github.com/sinemacula/.github/issues/25)) ([9914cff](https://github.com/sinemacula/.github/commit/9914cff494ab7694a1b9e1d20806e428dbe71e06))
+
 ## [1.5.0](https://github.com/sinemacula/.github/compare/v1.4.0...v1.5.0) (2026-06-16)
 
 
