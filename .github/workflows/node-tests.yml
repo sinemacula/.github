@@ -1,0 +1,137 @@
+# ==============================================================================
+# REUSABLE WORKFLOW: Node Tests
+# ==============================================================================
+# Test suite for Sine Macula Node / TypeScript repositories: typecheck, unit
+# tests at the repository's own coverage thresholds across a Node matrix, an
+# optional production build, the coverage upload to qlty, and an optional
+# Playwright end-to-end suite.
+#
+# Consumers call it with a one-line `uses:`. Thresholds are NOT inputs - they
+# live in each repository's own config (vitest), so this workflow stays
+# threshold-agnostic and tightening them propagates through the config, not
+# here. The build and e2e jobs toggle off for backends, libraries and tooling
+# that do not have them. The caller must grant `contents: read` and
+# `id-token: write` for the coverage upload.
+# ==============================================================================
+name: Node Tests
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            node-versions:
+                description: JSON array of Node.js versions for the test matrix
+                type: string
+                required: false
+                default: '["22", "24"]'
+            run-build:
+                description: Run the production build
+                type: boolean
+                required: false
+                default: true
+            run-e2e:
+                description: Run the Playwright end-to-end suite
+                type: boolean
+                required: false
+                default: true
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: read
+    id-token: write
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: TESTS
+    # ==========================================================================
+    tests:
+        name: Test / Node ${{ matrix.node }}
+        runs-on: ubuntu-latest
+
+        strategy:
+            fail-fast: false
+            matrix:
+                node: ${{ fromJSON(inputs.node-versions) }}
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ matrix.node }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Type-check
+                run: npm run typecheck
+
+            -   name: Test with coverage
+                run: npm run test:coverage
+
+            -   name: Build
+                if: ${{ inputs.run-build }}
+                run: npm run build
+
+            -   name: Publish code coverage
+                if: >-
+                    ${{ github.event_name == 'push' && github.ref == 'refs/heads/master'
+                    && matrix.node == fromJSON(inputs.node-versions)[0] }}
+                uses: qltysh/qlty-action/coverage@v2
+                with:
+                    oidc: true
+                    files: coverage/lcov.info
+
+    # ==========================================================================
+    # JOB: END-TO-END
+    # ==========================================================================
+    e2e:
+        name: End-to-end (Playwright)
+        if: ${{ inputs.run-e2e }}
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ fromJSON(inputs.node-versions)[0] }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Install Playwright browsers
+                run: npx playwright install --with-deps chromium
+
+            -   name: End-to-end tests
+                run: npm run test:e2e
+
+            -   name: Upload Playwright report
+                if: failure()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: playwright-report
+                    path: build/playwright-report/
+                    retention-days: 14

@@ -1,0 +1,178 @@
+# ==============================================================================
+# REUSABLE WORKFLOW: Node Quality Gates
+# ==============================================================================
+# Quality gates for Sine Macula Node / TypeScript repositories that are not run
+# by the qlty app: dead-code detection (knip), an optional bundle-size budget
+# (size-limit), and mutation testing. Mutation runs scoped to the changed files
+# on pull requests and a full pass on a schedule, matching the org convention.
+#
+# Consumers call it with a one-line `uses:`. Budgets and the mutation threshold
+# live in each repository's own config, so this workflow stays threshold-
+# agnostic. The size job toggles off for backends, libraries and tooling with no
+# bundle. The consumer provides `deadcode`, `size`, `mutation:scope` and
+# `test:mutation` scripts for the jobs it runs.
+# ==============================================================================
+name: Node Quality Gates
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            node-version:
+                description: Node.js version for the single-runner gates
+                type: string
+                required: false
+                default: '24'
+            run-size:
+                description: Run the size-limit bundle-budget gate
+                type: boolean
+                required: false
+                default: true
+            run-mutation:
+                description: Run the mutation gate
+                type: boolean
+                required: false
+                default: true
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: read
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: DEAD CODE
+    # ==========================================================================
+    deadcode:
+        name: Dead code (knip)
+        if: ${{ github.event_name != 'schedule' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Knip
+                run: npm run deadcode
+
+    # ==========================================================================
+    # JOB: BUNDLE SIZE
+    # ==========================================================================
+    size:
+        name: Bundle size (size-limit)
+        if: ${{ inputs.run-size && github.event_name != 'schedule' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Build
+                run: npm run build
+
+            -   name: Check bundle size
+                run: npm run size
+
+    # ==========================================================================
+    # JOB: MUTATION (scoped to the diff, on pull requests and pushes)
+    # ==========================================================================
+    mutation:
+        name: Mutation (scoped)
+        if: ${{ inputs.run-mutation && github.event_name != 'schedule' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    fetch-depth: 0
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Scoped mutation gate
+                env:
+                    BASE_REF: ${{ github.base_ref || 'master' }}
+                run: |
+                    git fetch --no-tags origin "$BASE_REF"
+                    files=$(npm run -s mutation:scope -- --base "origin/${BASE_REF}")
+                    if [ -z "$files" ]; then
+                        echo "No mutable source files changed."
+                        exit 0
+                    fi
+                    npm run test:mutation -- --mutate "$(echo "$files" | paste -sd, -)"
+
+    # ==========================================================================
+    # JOB: MUTATION FULL (scheduled / manual)
+    # ==========================================================================
+    mutation-full:
+        name: Mutation (full)
+        if: ${{ inputs.run-mutation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        continue-on-error: true
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Full mutation suite
+                run: npm run test:mutation
+
+            -   name: Upload mutation report
+                if: always()
+                uses: actions/upload-artifact@v7
+                with:
+                    name: mutation-report
+                    path: build/mutation/
+                    retention-days: 30
