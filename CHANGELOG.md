@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/sinemacula/.github/compare/v1.6.0...v1.6.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* drop the credentialed fetch from the scoped mutation gate ([#27](https://github.com/sinemacula/.github/issues/27)) ([650f5ae](https://github.com/sinemacula/.github/commit/650f5aeb59c5d94d97f84d780447a92ddd3c97ad))
+
 ## [1.6.0](https://github.com/sinemacula/.github/compare/v1.5.0...v1.6.0) (2026-07-16)
 
 
