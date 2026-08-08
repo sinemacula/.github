@@ -20,8 +20,8 @@ name: Node Quality Gates
 on:
     workflow_call:
         inputs:
-            runner:
-                description: Runner label used for all jobs
+            heavy-runner:
+                description: Runner label used for resource-intensive jobs
                 type: string
                 required: false
                 default: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
     deadcode:
         name: Dead code (knip)
         if: ${{ github.event_name != 'schedule' }}
-        runs-on: ${{ inputs.runner }}
+        runs-on: ubuntu-latest
 
         steps:
             -   name: Checkout
@@ -88,7 +88,7 @@ jobs:
     size:
         name: Bundle size (size-limit)
         if: ${{ inputs.run-size && github.event_name != 'schedule' }}
-        runs-on: ${{ inputs.runner }}
+        runs-on: ${{ inputs.heavy-runner }}
 
         steps:
             -   name: Checkout
@@ -117,7 +117,7 @@ jobs:
     mutation:
         name: Mutation (scoped)
         if: ${{ inputs.run-mutation && github.event_name != 'schedule' }}
-        runs-on: ${{ inputs.runner }}
+        runs-on: ${{ inputs.heavy-runner }}
 
         steps:
             -   name: Checkout
@@ -154,7 +154,7 @@ jobs:
         name: Mutation (full)
         if: ${{ inputs.run-mutation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         continue-on-error: true
-        runs-on: ${{ inputs.runner }}
+        runs-on: ${{ inputs.heavy-runner }}
 
         steps:
             -   name: Checkout
