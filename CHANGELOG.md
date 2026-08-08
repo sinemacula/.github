@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/sinemacula/.github/compare/v1.6.1...v1.7.0) (2026-08-08)
+
+
+### Features
+
+* **ci:** allow selecting runners for intensive Node jobs ([#46](https://github.com/sinemacula/.github/issues/46)) ([98a6561](https://github.com/sinemacula/.github/commit/98a6561766ccd424732480cc1dd6ab0775e7bbb0))
+
 ## [1.6.1](https://github.com/sinemacula/.github/compare/v1.6.0...v1.6.1) (2026-07-16)
 
 
