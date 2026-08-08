@@ -21,6 +21,11 @@ name: Node Tests
 on:
     workflow_call:
         inputs:
+            heavy-runner:
+                description: Runner label used for resource-intensive jobs
+                type: string
+                required: false
+                default: ubuntu-latest
             node-versions:
                 description: JSON array of Node.js versions for the test matrix
                 type: string
@@ -58,7 +63,7 @@ jobs:
     # ==========================================================================
     tests:
         name: Test / Node ${{ matrix.node }}
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.heavy-runner }}
 
         strategy:
             fail-fast: false
@@ -105,7 +110,7 @@ jobs:
     e2e:
         name: End-to-end (Playwright)
         if: ${{ inputs.run-e2e }}
-        runs-on: ubuntu-latest
+        runs-on: ${{ inputs.heavy-runner }}
 
         steps:
             -   name: Checkout
