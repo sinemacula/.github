@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/sinemacula/.github/compare/v1.7.0...v1.8.0) (2026-08-09)
+
+
+### Features
+
+* add mutation incremental caching ([#49](https://github.com/sinemacula/.github/issues/49)) ([aaf5432](https://github.com/sinemacula/.github/commit/aaf5432dcd78d6054f1bd29c048d1053556d1465))
+
 ## [1.7.0](https://github.com/sinemacula/.github/compare/v1.6.1...v1.7.0) (2026-08-08)
 
 
