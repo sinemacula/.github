@@ -137,7 +137,7 @@ jobs:
                 run: npm ci
 
             -   name: Restore mutation incremental cache
-                uses: actions/cache@v4
+                uses: actions/cache@v6
                 with:
                     path: .stryker-tmp/incremental.json
                     key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
@@ -181,7 +181,7 @@ jobs:
                 run: npm ci
 
             -   name: Restore mutation incremental cache
-                uses: actions/cache@v4
+                uses: actions/cache@v6
                 with:
                     path: .stryker-tmp/incremental.json
                     key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
