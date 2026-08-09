@@ -136,6 +136,15 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
+            -   name: Restore mutation incremental cache
+                uses: actions/cache@v6
+                with:
+                    path: .stryker-tmp/incremental.json
+                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+                    restore-keys: |
+                        stryker-${{ runner.os }}-${{ github.ref_name }}-
+                        stryker-${{ runner.os }}-master-
+
             -   name: Scoped mutation gate
                 env:
                     BASE_REF: ${{ github.base_ref || 'master' }}
@@ -170,6 +179,15 @@ jobs:
 
             -   name: Install dependencies
                 run: npm ci
+
+            -   name: Restore mutation incremental cache
+                uses: actions/cache@v6
+                with:
+                    path: .stryker-tmp/incremental.json
+                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+                    restore-keys: |
+                        stryker-${{ runner.os }}-${{ github.ref_name }}-
+                        stryker-${{ runner.os }}-master-
 
             -   name: Full mutation suite
                 run: npm run test:mutation
