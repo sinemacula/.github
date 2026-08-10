@@ -11,6 +11,12 @@
 # agnostic. The size job toggles off for backends, libraries and tooling with no
 # bundle. The consumer provides `deadcode`, `size`, `mutation:scope` and
 # `test:mutation` scripts for the jobs it runs.
+#
+# Consumers that enable Stryker's `incremental` option get a cached incremental
+# report, keyed on the branch and on a fingerprint of the test environment so a
+# rewritten test never reuses the verdict recorded against the old one. The
+# cache is restored only from the branch's own runs; the scheduled sweep forces
+# a full rerun.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -136,14 +142,36 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
+            -   name: Fingerprint the test environment
+                env:
+                    # Stryker only invalidates a mutant when the mutated code
+                    # changes, never when the tests protecting it change, and for
+                    # static mutants it cannot tell at all. A key on the commit
+                    # alone would therefore reuse verdicts recorded against tests
+                    # that have since been rewritten, so the tests and the
+                    # tooling around them are fingerprinted as well.
+                    HASH: >-
+                        ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
+                        '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
+                        '**/__tests__/**', '**/__mocks__/**', '**/test-support/**',
+                        '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
+                run: echo "TEST_ENV_HASH=$HASH" >> "$GITHUB_ENV"
+
             -   name: Restore mutation incremental cache
                 uses: actions/cache@v6
                 with:
-                    path: .stryker-tmp/incremental.json
-                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+                    # Where Stryker writes the incremental report. Not the temp
+                    # dir - that is deleted after a successful run.
+                    path: reports/stryker-incremental.json
+                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-${{ github.sha }}
+                    # Branch-local by design. Stryker keeps cached out-of-scope
+                    # mutants in the report and scores them alongside the scoped
+                    # ones, and the break threshold is applied to that blended
+                    # figure, so restoring master's cache would let cached
+                    # passing results mask survivors in the changed files.
+                    # Revisit once the gate can score the mutated scope alone.
                     restore-keys: |
-                        stryker-${{ runner.os }}-${{ github.ref_name }}-
-                        stryker-${{ runner.os }}-master-
+                        stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-
 
             -   name: Scoped mutation gate
                 env:
@@ -159,10 +187,13 @@ jobs:
     # ==========================================================================
     # JOB: MUTATION FULL (scheduled / manual)
     # ==========================================================================
+    # Blocking, not advisory: this sweep is the safety net for the per-PR
+    # scoping, so anything it finds outside the changed files has to be visible
+    # and actionable rather than a silently red-but-passing job.
+    # ==========================================================================
     mutation-full:
         name: Mutation (full)
         if: ${{ inputs.run-mutation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-        continue-on-error: true
         runs-on: ${{ inputs.heavy-runner }}
 
         steps:
@@ -180,17 +211,37 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
+            -   name: Fingerprint the test environment
+                env:
+                    # As in the scoped job: a rewritten test must not reuse the
+                    # verdict recorded against the old one.
+                    HASH: >-
+                        ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
+                        '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
+                        '**/__tests__/**', '**/__mocks__/**', '**/test-support/**',
+                        '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
+                run: echo "TEST_ENV_HASH=$HASH" >> "$GITHUB_ENV"
+
             -   name: Restore mutation incremental cache
                 uses: actions/cache@v6
                 with:
-                    path: .stryker-tmp/incremental.json
-                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+                    # Where Stryker writes the incremental report. Not the temp
+                    # dir - that is deleted after a successful run.
+                    path: reports/stryker-incremental.json
+                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-${{ github.sha }}
+                    # This sweep mutates everything and reruns every mutant, so
+                    # there is no out-of-scope report to blend and master's
+                    # cache is a safe warm start for a manual run off-branch.
                     restore-keys: |
-                        stryker-${{ runner.os }}-${{ github.ref_name }}-
-                        stryker-${{ runner.os }}-master-
+                        stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-
+                        stryker-${{ runner.os }}-master-${{ env.TEST_ENV_HASH }}-
 
             -   name: Full mutation suite
-                run: npm run test:mutation
+                # `incremental` is read on every run, so without `--force` the
+                # sweep would reuse the cache and stop being a full rerun. The
+                # flag reruns every mutant and rewrites the report, which keeps
+                # this working without a second npm script in every consumer.
+                run: npm run test:mutation -- --force
 
             -   name: Upload mutation report
                 if: always()
