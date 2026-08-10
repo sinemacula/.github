@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/sinemacula/.github/compare/v1.8.0...v1.8.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* repair the mutation incremental cache ([#51](https://github.com/sinemacula/.github/issues/51)) ([e51d641](https://github.com/sinemacula/.github/commit/e51d641a5972b76edf7926362d4bab71472a57b0))
+
 ## [1.8.0](https://github.com/sinemacula/.github/compare/v1.7.0...v1.8.0) (2026-08-09)
 
 
