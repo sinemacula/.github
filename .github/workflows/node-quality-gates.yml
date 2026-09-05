@@ -46,6 +46,11 @@ on:
                 type: boolean
                 required: false
                 default: true
+            mutation-fingerprint-script:
+                description: npm script printing a hash of the tests that reach the scoped diff. Unset hashes every test
+                type: string
+                required: false
+                default: ''
 
 # ==============================================================================
 # PERMISSIONS
@@ -150,12 +155,30 @@ jobs:
                     # alone would therefore reuse verdicts recorded against tests
                     # that have since been rewritten, so the tests and the
                     # tooling around them are fingerprinted as well.
-                    HASH: >-
+                    CONFIG_HASH: >-
                         ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
-                        '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
-                        '**/__tests__/**', '**/__mocks__/**', '**/test-support/**',
-                        '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
-                run: echo "TEST_ENV_HASH=$HASH" >> "$GITHUB_ENV"
+                        '**/vitest.config.*', '**/vitest.workspace.*', '!**/node_modules/**') }}
+                    # Blunt: any test edit discards the cache, including one
+                    # that cannot reach the mutated code.
+                    ALL_TESTS_HASH: >-
+                        ${{ hashFiles('**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/__mocks__/**',
+                        '**/test-support/**', '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
+                    FINGERPRINT_SCRIPT: ${{ inputs.mutation-fingerprint-script }}
+                    BASE_REF: ${{ github.base_ref || 'master' }}
+                # A narrowed fingerprint that misses a test able to kill a
+                # static mutant reuses that verdict until the scheduled sweep,
+                # so a script that fails or says nothing fails the gate.
+                run: |
+                    if [ -n "$FINGERPRINT_SCRIPT" ]; then
+                        tests=$(npm run -s "$FINGERPRINT_SCRIPT" -- --base "origin/${BASE_REF}") || tests=''
+                        if [ -z "$tests" ]; then
+                            echo "::error::${FINGERPRINT_SCRIPT} gave no usable fingerprint."
+                            exit 1
+                        fi
+                    else
+                        tests="$ALL_TESTS_HASH"
+                    fi
+                    echo "TEST_ENV_HASH=${CONFIG_HASH}-${tests}" >> "$GITHUB_ENV"
 
             -   name: Restore mutation incremental cache
                 uses: actions/cache@v6
