@@ -66,6 +66,15 @@ permissions:
     contents: read
 
 # ==============================================================================
+# ENVIRONMENT
+# ==============================================================================
+# A stalled cache download otherwise holds a job for ten minutes before it
+# falls back to a normal install; one minute makes it fall back quickly.
+# ==============================================================================
+env:
+    SEGMENT_DOWNLOAD_TIMEOUT_MINS: 1
+
+# ==============================================================================
 # DEFAULTS
 # ==============================================================================
 defaults:
