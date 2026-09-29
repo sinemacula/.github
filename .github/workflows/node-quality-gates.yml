@@ -479,9 +479,26 @@ jobs:
 
             -   name: Scoped mutation gate
                 id: stryker
+                env:
+                    SHARD: ${{ matrix.shard }}
+                # A scope with no mutants (a types-only file, say) finds no
+                # related tests, and Stryker fails that as a config error.
                 run: |
+                    set -o pipefail
                     touch "$RUNNER_TEMP/stryker-started"
-                    npm run test:mutation -- --mutate "$MUTATE" --incrementalFile "$REPORT"
+                    log="$RUNNER_TEMP/stryker.log"
+                    status=0
+                    npm run test:mutation -- --mutate "$MUTATE" --incrementalFile "$REPORT" 2>&1 | tee "$log" \
+                        || status=$?
+                    [ "$status" -eq 0 ] && exit 0
+                    plain=$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$log")
+                    if grep -Eq 'Instrumented [1-9][0-9]* source file\(s\) with 0 mutant\(s\)' <<< "$plain" \
+                        && ! grep -Eq 'Instrumented [0-9]+ source file\(s\) with [1-9][0-9]* mutant\(s\)' <<< "$plain" \
+                        && grep -Fq 'No tests were executed. Stryker will exit prematurely' <<< "$plain"; then
+                        echo "::notice::Shard $SHARD has no mutants in scope."
+                        exit 0
+                    fi
+                    exit "$status"
 
             -   name: Check the report is fresh
                 id: fresh
