@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/sinemacula/.github/compare/v1.8.1...v1.9.0) (2026-09-29)
+
+
+### Features
+
+* **mutation:** shard the scoped run and keep its cache across re-runs ([#61](https://github.com/sinemacula/.github/issues/61)) ([fc84d99](https://github.com/sinemacula/.github/commit/fc84d998d4e1363adcc50b3b753af00e9c8fc699))
+
 ## [1.8.1](https://github.com/sinemacula/.github/compare/v1.8.0...v1.8.1) (2026-08-10)
 
 
