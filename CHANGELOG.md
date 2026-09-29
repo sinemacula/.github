@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/sinemacula/.github/compare/v1.9.0...v1.9.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **ci:** give up on a stalled cache download after a minute ([#63](https://github.com/sinemacula/.github/issues/63)) ([58043cd](https://github.com/sinemacula/.github/commit/58043cdd28f48c706bc11f7a20f4ab4af63ca02d))
+
 ## [1.9.0](https://github.com/sinemacula/.github/compare/v1.8.1...v1.9.0) (2026-09-29)
 
 
