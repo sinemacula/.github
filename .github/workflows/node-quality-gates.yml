@@ -12,11 +12,16 @@
 # bundle. The consumer provides `deadcode`, `size`, `mutation:scope` and
 # `test:mutation` scripts for the jobs it runs.
 #
-# Consumers that enable Stryker's `incremental` option get a cached incremental
-# report, keyed on the branch and on a fingerprint of the test environment so a
-# rewritten test never reuses the verdict recorded against the old one. The
-# cache is restored only from the branch's own runs; the scheduled sweep forces
-# a full rerun.
+# The scoped gate splits the changed files across up to `mutation-shards`
+# runners, and each shard must meet the break threshold both in Stryker's
+# figure and on its own scope. With Stryker's `incremental` option each
+# shard's report is cached, and the reports are merged and restored only from
+# the branch's own runs. Cached survivors and static non-kills always rerun,
+# and so does a kill whose test file changed at all: Stryker only sees an edit
+# that falls inside a test's own lines. Cached timeouts are left to Stryker's
+# own reuse rules: it scores them as detected, and retesting one costs a full
+# timeout. The key covers the tooling and the test helpers, fixtures, data
+# files and snapshots. The scheduled sweep forces a full rerun.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -46,6 +51,13 @@ on:
                 type: boolean
                 required: false
                 default: true
+            mutation-shards:
+                description: >-
+                    Maximum heavy runners the scoped mutation gate splits the changed files across (1 to 256).
+                    The required check stays "Mutation (scoped)".
+                type: number
+                required: false
+                default: 1
 
 # ==============================================================================
 # PERMISSIONS
@@ -118,12 +130,17 @@ jobs:
                 run: npm run size
 
     # ==========================================================================
-    # JOB: MUTATION (scoped to the diff, on pull requests and pushes)
+    # JOB: MUTATION PLAN (scope and shards, on pull requests and pushes)
     # ==========================================================================
-    mutation:
-        name: Mutation (scoped)
+    mutation-plan:
+        name: Mutation plan
         if: ${{ inputs.run-mutation && github.event_name != 'schedule' }}
-        runs-on: ${{ inputs.heavy-runner }}
+        runs-on: ubuntu-latest
+
+        outputs:
+            empty: ${{ steps.plan.outputs.empty }}
+            fingerprint: ${{ steps.plan.outputs.fingerprint }}
+            matrix: ${{ steps.plan.outputs.matrix }}
 
         steps:
             -   name: Checkout
@@ -142,47 +159,730 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
-            -   name: Fingerprint the test environment
-                env:
-                    # Stryker only invalidates a mutant when the mutated code
-                    # changes, never when the tests protecting it change, and for
-                    # static mutants it cannot tell at all. A key on the commit
-                    # alone would therefore reuse verdicts recorded against tests
-                    # that have since been rewritten, so the tests and the
-                    # tooling around them are fingerprinted as well.
-                    HASH: >-
-                        ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
-                        '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
-                        '**/__tests__/**', '**/__mocks__/**', '**/test-support/**',
-                        '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
-                run: echo "TEST_ENV_HASH=$HASH" >> "$GITHUB_ENV"
-
-            -   name: Restore mutation incremental cache
-                uses: actions/cache@v6
-                with:
-                    # Where Stryker writes the incremental report. Not the temp
-                    # dir - that is deleted after a successful run.
-                    path: reports/stryker-incremental.json
-                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-${{ github.sha }}
-                    # Branch-local by design. Stryker keeps cached out-of-scope
-                    # mutants in the report and scores them alongside the scoped
-                    # ones, and the break threshold is applied to that blended
-                    # figure, so restoring master's cache would let cached
-                    # passing results mask survivors in the changed files.
-                    # Revisit once the gate can score the mutated scope alone.
-                    restore-keys: |
-                        stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-
-
-            -   name: Scoped mutation gate
+            -   name: Plan the shards
+                id: plan
                 env:
                     BASE_REF: ${{ github.base_ref || 'master' }}
+                    SHARDS: ${{ inputs.mutation-shards }}
+                    SCOPE_FILE: ${{ runner.temp }}/scope.txt
                 run: |
-                    files=$(npm run -s mutation:scope -- --base "origin/${BASE_REF}")
-                    if [ -z "$files" ]; then
+                    npm run -s mutation:scope -- --base "origin/${BASE_REF}" > "$SCOPE_FILE"
+                    node - <<'JS'
+                    // Splits the scope into balanced shards and fingerprints what the tests read.
+                    const fs = require('node:fs');
+                    const crypto = require('node:crypto');
+                    const path = require('node:path');
+                    const { execFileSync } = require('node:child_process');
+
+                    const fail = (message) => {
+                        console.log(`::error::${message}`);
+                        process.exit(1);
+                    };
+                    const output = (name, value) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+                    const sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
+
+                    // Test files stay out of the key: the shard retests the kills of a test file that changed.
+                    const tooling = [/^package-lock\.json$/, /^tsconfig.*\.json$/, /^stryker.*\.config\./,
+                        /^vitest.*\.(config|workspace)\./];
+                    // Data files named like tests (foo.test.json) count as support wherever they sit.
+                    const support = new RegExp(String.raw`(^|/)(tests?|specs?|__(tests|mocks|fixtures|snapshots)__`
+                        + String.raw`|test-support)/|\.snap$|\.(test|spec)\.[^/]+$`);
+                    // Keep in step with the test file record, which hashes exactly these files instead.
+                    const testFile = /(\.(test|spec)|[sS]pec)\.[cm]?[jt]sx?$/;
+                    const fingerprinted = (file) => tooling.some((pattern) => pattern.test(file.split('/').pop()))
+                        || (support.test(file) && !testFile.test(file));
+                    const fingerprint = sha256(execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
+                        .split('\0')
+                        .filter((file) => file && fingerprinted(file))
+                        .sort()
+                        .map((file) => {
+                            let digest = 'unreadable';
+                            try {
+                                digest = sha256(fs.readFileSync(file));
+                            } catch {}
+                            return `${file}\0${digest}\n`;
+                        })
+                        .join(''));
+                    output('fingerprint', fingerprint);
+
+                    const shards = Number(process.env.SHARDS);
+                    if (!Number.isInteger(shards) || shards < 1 || shards > 256) {
+                        fail(`mutation-shards must be an integer from 1 to 256, got '${process.env.SHARDS}'.`);
+                    }
+
+                    const lineCount = (file) => {
+                        try {
+                            return fs.readFileSync(file, 'utf8').split('\n').length;
+                        } catch {
+                            return 1;
+                        }
+                    };
+                    const normalise = (file) =>
+                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
+                    let tracked;
+                    // Extended globs count too: @(a|b), +(a), !(a), ?(a), *(a) and a|b inside parentheses.
+                    const isGlob = (pattern) => /[*?[\]{}]|[@+!]\(|\([^)]*\|/.test(pattern) && !fs.existsSync(pattern);
+                    const matches = (file, pattern) => {
+                        if (!isGlob(pattern)) {
+                            return file === normalise(pattern);
+                        }
+                        if (typeof path.matchesGlob !== 'function') {
+                            fail(`Scope entry '${pattern}' is a glob, which needs Node.js 22.5 or later.`);
+                        }
+                        return path.matchesGlob(file, normalise(pattern));
+                    };
+
+                    // Globs become the tracked files they match, in order, so shards and scores see real paths.
+                    const scoped = new Map();
+                    for (const line of fs.readFileSync(process.env.SCOPE_FILE, 'utf8').split('\n')) {
+                        const text = line.replace(/\r$/, '').trim();
+                        if (text === '') {
+                            continue;
+                        }
+                        if (text.includes(',')) {
+                            fail(`Scope entry '${text}' contains a comma, which --mutate cannot carry.`);
+                        }
+                        const negated = text.startsWith('!');
+                        const body = negated ? text.slice(1) : text;
+                        // Stryker's own range syntax: path:line[:column]-line[:column].
+                        const range = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/.exec(body);
+                        const pattern = range ? range[1] : body;
+                        if (negated) {
+                            // As in Stryker, an exclusion drops the whole file whatever its range.
+                            for (const [key, entry] of scoped) {
+                                if (matches(entry.path, pattern)) {
+                                    scoped.delete(key);
+                                }
+                            }
+                            continue;
+                        }
+                        const [start, end] = range ? [Number(range[3]), Number(range[5])] : [0, 0];
+                        if (range && (start < 1 || start > end)) {
+                            fail(`Scope entry '${text}' has an empty or reversed line range.`);
+                        }
+                        tracked ??= execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0');
+                        const files = isGlob(pattern)
+                            ? tracked.filter((file) => file && matches(file, pattern))
+                            : [normalise(pattern)];
+                        if (files.length === 0) {
+                            console.log(`::warning::Scope entry '${text}' matches no tracked file.`);
+                        }
+                        for (const file of files) {
+                            if (file.includes(',')) {
+                                fail(`Scope entry '${text}' matches '${file}', whose comma --mutate cannot carry.`);
+                            }
+                            const weight = range ? end - start + 1 : lineCount(file);
+                            const entry = range ? `${file}:${range[2]}` : file;
+                            scoped.set(entry, { path: file, start, text: entry, weight, range: Boolean(range) });
+                        }
+                    }
+                    const byPath = new Map();
+                    for (const entry of scoped.values()) {
+                        byPath.set(entry.path, [...(byPath.get(entry.path) ?? []), entry]);
+                    }
+
+                    if (byPath.size === 0) {
+                        console.log('No mutable source files changed.');
+                        output('empty', 'true');
+                        output('matrix', JSON.stringify({ include: [] }));
+                        process.exit(0);
+                    }
+
+                    const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+                    const weigh = (entries) => entries.reduce((sum, entry) => sum + entry.weight, 0);
+                    const files = [...byPath.keys()].sort(compare).map((file) => byPath.get(file));
+                    const total = files.reduce((sum, entries) => sum + weigh(entries), 0);
+
+                    // A dominating file with several ranges is split by range; a range is never cut.
+                    const units = files.flatMap((entries) =>
+                        weigh(entries) > total / shards && entries.length > 1 && entries.every((entry) => entry.range)
+                            ? entries.map((entry) => ({ key: entry.text, weight: entry.weight, entries: [entry] }))
+                            : [{ key: entries[0].path, weight: weigh(entries), entries }]);
+                    units.sort((a, b) => b.weight - a.weight || compare(a.key, b.key));
+
+                    const count = Math.min(shards, units.length);
+                    const bins = Array.from({ length: count }, () => ({ weight: 0, entries: [] }));
+                    for (const unit of units) {
+                        const bin = bins.reduce((least, other) => (other.weight < least.weight ? other : least));
+                        bin.weight += unit.weight;
+                        bin.entries.push(...unit.entries);
+                    }
+
+                    // Every entry is a real path now, but Stryker matches --mutate entries with minimatch after
+                    // turning backslashes into slashes, so each magic character becomes a one-character class.
+                    // A leading ! would read as an exclusion, so such a path starts with ./ instead.
+                    const escape = (file) => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
+                    const include = bins.map((bin, index) => {
+                        bin.entries.sort((a, b) => compare(a.path, b.path) || a.start - b.start);
+                        const mutate = bin.entries
+                            .map((entry) => escape(entry.path) + entry.text.slice(entry.path.length))
+                            .join(',');
+                        return { shard: index + 1, mutate };
+                    });
+                    output('empty', 'false');
+                    output('matrix', JSON.stringify({ include }));
+
+                    const rows = bins.map((bin, index) => {
+                        const entries = bin.entries.map((entry) => `\`${entry.text}\``).join(' ');
+                        return `| ${index + 1} | ${bin.weight} | ${entries} |`;
+                    });
+                    const summary = ['| Shard | Weight | Entries |', '| --- | --- | --- |', ...rows].join('\n');
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shards\n\n${summary}\n`);
+                    console.log(summary);
+                    JS
+
+    # ==========================================================================
+    # JOB: MUTATION SHARD (one runner per planned shard)
+    # ==========================================================================
+    # Each shard restores the newest cache entry for the branch, drops what a
+    # cached result cannot vouch for, and saves its own report whether it
+    # passed or failed. Stryker's break threshold still applies, and the
+    # shard's own scope must meet it too: Stryker's figure also counts the
+    # cached kills it carries from outside the scope.
+    # ==========================================================================
+    mutation-shard:
+        name: Mutation shard ${{ matrix.shard }}
+        needs: mutation-plan
+        if: ${{ needs.mutation-plan.outputs.empty == 'false' }}
+        runs-on: ${{ inputs.heavy-runner }}
+
+        strategy:
+            # A shard cancelled by a sibling's failure would save nothing.
+            fail-fast: false
+            matrix: ${{ fromJSON(needs.mutation-plan.outputs.matrix) }}
+
+        env:
+            MUTATE: ${{ matrix.mutate }}
+            REPORT: reports/stryker-incremental.json
+            TESTS: reports/stryker-incremental.tests.json
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    # Full history: the scoped diff and some tests run git.
+                    fetch-depth: 0
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Install dependencies
+                run: npm ci
+
+            -   name: Name the cache
+                id: cache
+                env:
+                    REF: ${{ github.ref_name }}
+                    FINGERPRINT: ${{ needs.mutation-plan.outputs.fingerprint }}
+                run: echo "prefix=stryker-v3-${RUNNER_OS}-${REF}-${FINGERPRINT}" >> "$GITHUB_OUTPUT"
+
+            -   name: Restore mutation incremental cache
+                id: restore
+                uses: actions/cache/restore@v6
+                with:
+                    # Where Stryker writes the incremental report, and the test
+                    # files it was recorded against. Not the temp dir - that is
+                    # deleted after a successful run.
+                    path: |
+                        reports/stryker-incremental.json
+                        reports/stryker-incremental.tests.json
+                    key: >-
+                        ${{ steps.cache.outputs.prefix }}-shard-${{ matrix.shard }}-${{ github.run_id
+                        }}-${{ github.run_attempt }}
+                    # Branch-local by design: master's results were recorded
+                    # against other code. The newest entry wins: the merged one
+                    # after a finished run, else the last shard to save. Every
+                    # report carries what its shard restored.
+                    restore-keys: |
+                        ${{ steps.cache.outputs.prefix }}-
+
+            -   name: Drop cached results to retest
+                run: |
+                    node - <<'JS'
+                    // Keeps a kill only when a test file that has not changed killed it; Stryker would reuse a
+                    // kill after an edit outside the test's own lines, such as shared setup. Survivors, no-coverage
+                    // results and static non-kills always rerun. Timeouts stay, static or not, for Stryker's own
+                    // rules to reuse or retest: it scores a timeout as detected, and each retest costs a full
+                    // timeout.
+                    const fs = require('node:fs');
+                    const path = require('node:path');
+                    const crypto = require('node:crypto');
+                    const normalise = (file) =>
+                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
+                    const digest = (file) => {
+                        try {
+                            return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+                        } catch {
+                            return 'missing';
+                        }
+                    };
+
+                    let recorded = null;
+                    try {
+                        recorded = JSON.parse(fs.readFileSync(process.env.TESTS, 'utf8')).files ?? null;
+                    } catch {}
+                    // Only this run's record may be saved with this run's report.
+                    fs.rmSync(process.env.TESTS, { force: true });
+
+                    const file = process.env.REPORT;
+                    if (!fs.existsSync(file)) {
+                        console.log('No cached mutation results.');
+                        process.exit(0);
+                    }
+                    let report;
+                    try {
+                        report = JSON.parse(fs.readFileSync(file, 'utf8'));
+                    } catch {}
+                    if (!report || typeof report.files !== 'object' || report.files === null) {
+                        console.log('::warning::The cached mutation report is unreadable; running without it.');
+                        fs.rmSync(file);
+                        process.exit(0);
+                    }
+                    if (recorded === null) {
+                        console.log('::warning::The cached report has no test file record; every cached kill reruns.');
+                    }
+
+                    const changed = new Set(Object.entries(recorded ?? {})
+                        .filter(([name, hash]) => digest(name) !== hash)
+                        .map(([name]) => name));
+                    const testFileById = new Map();
+                    for (const [name, testFile] of Object.entries(report.testFiles ?? {})) {
+                        for (const test of name === '' ? [] : testFile.tests ?? []) {
+                            testFileById.set(test.id, normalise(name));
+                        }
+                    }
+                    const vouched = (mutant) => recorded !== null && (changed.size === 0
+                        || (mutant.killedBy ?? []).some((id) => testFileById.has(id)
+                            && !changed.has(testFileById.get(id))));
+                    const keep = (mutant) => {
+                        if (mutant.status === 'Killed') {
+                            return vouched(mutant);
+                        }
+                        return mutant.status === 'Timeout'
+                            || (['CompileError', 'Ignored'].includes(mutant.status) && mutant.static !== true);
+                    };
+
+                    let dropped = 0;
+                    for (const result of Object.values(report.files)) {
+                        const kept = (result.mutants ?? []).filter(keep);
+                        dropped += (result.mutants ?? []).length - kept.length;
+                        result.mutants = kept;
+                    }
+                    fs.writeFileSync(file, JSON.stringify(report));
+                    [...changed].sort().forEach((name) => console.log(`Test file changed: ${name}`));
+                    console.log(`Dropped ${dropped} cached result(s) for retesting.`);
+                    JS
+
+            -   name: Scoped mutation gate
+                id: stryker
+                run: |
+                    touch "$RUNNER_TEMP/stryker-started"
+                    npm run test:mutation -- --mutate "$MUTATE" --incrementalFile "$REPORT"
+
+            -   name: Check the report is fresh
+                id: fresh
+                if: ${{ !cancelled() }}
+                # A restored or truncated report must never be saved, merged or
+                # scored as this run's.
+                run: |
+                    if node -e '
+                        const fs = require("node:fs");
+                        const marker = require("node:path").join(process.env.RUNNER_TEMP, "stryker-started");
+                        const written = fs.existsSync(marker) && fs.existsSync(process.env.REPORT)
+                            && fs.statSync(process.env.REPORT).mtimeMs > fs.statSync(marker).mtimeMs;
+                        const report = written && JSON.parse(fs.readFileSync(process.env.REPORT, "utf8"));
+                        process.exit(report && typeof report.files === "object" && report.files !== null ? 0 : 1);
+                    '; then
+                        echo "fresh=true" >> "$GITHUB_OUTPUT"
+                    else
+                        rm -f "$REPORT" "$TESTS"
+                        echo "fresh=false" >> "$GITHUB_OUTPUT"
+                    fi
+
+            -   name: Record the test files
+                id: tests
+                if: ${{ !cancelled() && steps.fresh.outputs.fresh == 'true' }}
+                run: |
+                    node - <<'JS'
+                    // Hashes every test file the report names or the naming convention finds, for the next drop.
+                    const fs = require('node:fs');
+                    const path = require('node:path');
+                    const crypto = require('node:crypto');
+                    const { execFileSync } = require('node:child_process');
+                    const normalise = (file) =>
+                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
+                    const digest = (file) => {
+                        try {
+                            return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+                        } catch {
+                            return 'missing';
+                        }
+                    };
+                    const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+                    const named = Object.keys(report.testFiles ?? {}).filter((name) => name !== '').map(normalise);
+                    const conventional = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
+                        .split('\0')
+                        // The plan's test file pattern: these files stay out of its fingerprint.
+                        .filter((name) => /(\.(test|spec)|[sS]pec)\.[cm]?[jt]sx?$/.test(name));
+                    const files = Object.fromEntries([...new Set([...named, ...conventional])]
+                        .sort()
+                        .map((name) => [name, digest(name)]));
+                    fs.writeFileSync(process.env.TESTS, JSON.stringify({ files }));
+                    console.log(`Recorded ${Object.keys(files).length} test file(s).`);
+                    JS
+
+            -   name: Save mutation incremental cache
+                if: ${{ !cancelled() && steps.tests.outcome == 'success' }}
+                uses: actions/cache/save@v6
+                with:
+                    path: |
+                        reports/stryker-incremental.json
+                        reports/stryker-incremental.tests.json
+                    key: ${{ steps.restore.outputs.cache-primary-key }}
+
+            -   name: Score the shard's own scope
+                if: ${{ !cancelled() && steps.stryker.outcome != 'skipped' && steps.fresh.outcome == 'success' }}
+                env:
+                    FRESH: ${{ steps.fresh.outputs.fresh }}
+                run: |
+                    if [ "$FRESH" != true ]; then
+                        echo "::notice::No incremental report, so the gate's own verdict stands."
+                        exit 0
+                    fi
+                    node - <<'JS'
+                    // Counts only mutants inside this shard's --mutate entries, by Stryker's range rules.
+                    const fs = require('node:fs');
+                    const path = require('node:path');
+                    const normalise = (file) =>
+                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
+                    const atOrAfter = (a, b) => a.line > b.line || (a.line === b.line && a.column >= b.column);
+                    // Report columns are one-based; Stryker reads range columns as zero-based.
+                    const inRange = ({ start, end }, range) =>
+                        atOrAfter({ line: start.line, column: start.column - 1 }, range.start)
+                        && atOrAfter(range.end, { line: end.line, column: end.column - 1 });
+                    // The plan escapes magic characters as one-character classes for Stryker.
+                    const unescape = (file) => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
+                    const scope = new Map();
+                    for (const entry of process.env.MUTATE.split(',')) {
+                        const range = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/.exec(entry);
+                        const file = normalise(unescape(range ? range[1] : entry));
+                        const current = scope.get(file);
+                        if (!range) {
+                            scope.set(file, true);
+                        } else if (current !== true) {
+                            scope.set(file, [...(current ?? []), {
+                                start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
+                                end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
+                            }]);
+                        }
+                    }
+
+                    const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
+                    const mutantsByFile = new Map();
+                    for (const [file, result] of Object.entries(report.files)) {
+                        const key = normalise(file);
+                        mutantsByFile.set(key, [...(mutantsByFile.get(key) ?? []), ...(result.mutants ?? [])]);
+                    }
+
+                    let detected = 0;
+                    let timedOut = 0;
+                    const undetected = [];
+                    for (const [file, ranges] of scope) {
+                        const mutants = (mutantsByFile.get(file) ?? []).filter(({ location }) =>
+                            ranges === true || ranges.some((range) => inRange(location, range)));
+                        if (mutants.length === 0) {
+                            console.log(`::warning::No mutants in scope for ${file}.`);
+                        }
+                        for (const mutant of mutants) {
+                            if (['Killed', 'Timeout'].includes(mutant.status)) {
+                                detected++;
+                                timedOut += mutant.status === 'Timeout' ? 1 : 0;
+                            } else if (['Survived', 'NoCoverage'].includes(mutant.status)) {
+                                const replacement = String(mutant.replacement ?? '').replace(/\s+/g, ' ').slice(0, 80);
+                                const { line, column } = mutant.location.start;
+                                undetected.push(
+                                    `${file}:${line}:${column} ${mutant.status} ${mutant.mutatorName} ${replacement}`);
+                            }
+                        }
+                    }
+
+                    const counted = detected + undetected.length;
+                    const threshold = report.thresholds?.break;
+                    const score = counted === 0 ? 100 : (detected / counted) * 100;
+                    // A timeout counts as detected, as in Stryker; the count shows how much rests on that.
+                    const verdict = counted === 0
+                        ? 'In-scope mutation score: no counted mutants.'
+                        : `In-scope mutation score: ${score.toFixed(2)} (${detected} detected, ${timedOut} of them`
+                            + ` by timeout, ${undetected.length} undetected).`;
+                    undetected.forEach((line) => console.log(line));
+                    console.log(verdict);
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shard\n\n${verdict}\n`
+                        + (undetected.length ? `\n~~~text\n${undetected.join('\n')}\n~~~\n` : ''));
+                    if (typeof threshold === 'number' && counted > 0 && score < threshold) {
+                        console.log(`::error::Score ${score.toFixed(2)} is under break threshold ${threshold}.`);
+                        process.exit(1);
+                    }
+                    JS
+
+            -   name: Upload shard report
+                if: ${{ !cancelled() }}
+                uses: actions/upload-artifact@v7
+                with:
+                    name: mutation-scoped-shard-${{ matrix.shard }}
+                    path: |
+                        reports/stryker-incremental.json
+                        reports/stryker-incremental.tests.json
+                        build/mutation/
+                    if-no-files-found: ignore
+                    overwrite: true
+                    retention-days: 7
+
+    # ==========================================================================
+    # JOB: MUTATION CACHE (merge the shard reports)
+    # ==========================================================================
+    # GitHub restores a single cache entry, so the shards' reports are merged
+    # into one that every shard restores next time. It also runs when the run
+    # is cancelled, so the shards that finished are kept. Best effort: a
+    # failed merge only costs reuse. Runs on the shards' runner so it writes
+    # to the cache they read.
+    # ==========================================================================
+    mutation-cache:
+        name: Mutation cache
+        needs: [ mutation-plan, mutation-shard ]
+        if: ${{ always() && needs.mutation-plan.outputs.empty == 'false' }}
+        runs-on: ${{ inputs.heavy-runner }}
+
+        steps:
+            -   name: Setup Node.js
+                if: ${{ always() }}
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+
+            -   name: Name the cache
+                id: cache
+                if: ${{ always() }}
+                env:
+                    REF: ${{ github.ref_name }}
+                    FINGERPRINT: ${{ needs.mutation-plan.outputs.fingerprint }}
+                run: echo "prefix=stryker-v3-${RUNNER_OS}-${REF}-${FINGERPRINT}" >> "$GITHUB_OUTPUT"
+
+            -   name: Download shard reports
+                if: ${{ always() }}
+                continue-on-error: true
+                uses: actions/download-artifact@v8
+                with:
+                    pattern: mutation-scoped-shard-*
+                    path: ${{ runner.temp }}/shards
+
+            -   name: Merge shard reports
+                id: merge
+                if: ${{ always() }}
+                continue-on-error: true
+                env:
+                    MATRIX: ${{ needs.mutation-plan.outputs.matrix }}
+                    SHARDS_DIR: ${{ runner.temp }}/shards
+                run: |
+                    node - <<'JS'
+                    // Unions every report by mutant and test key; a shard's own scope wins over carried copies.
+                    const fs = require('node:fs');
+                    const path = require('node:path');
+                    const testKey = (file, test) => {
+                        const start = test.location?.start ?? { line: 0, column: 0 };
+                        return `${file}@${start.line}:${start.column}\n${test.name}`;
+                    };
+                    const mutantKey = (file, { mutatorName, replacement, location: { start, end } }) =>
+                        `${file}@${start.line}:${start.column}-${end.line}:${end.column}\n`
+                        + `${mutatorName}: ${replacement}`;
+                    const atOrAfter = (a, b) => a.line > b.line || (a.line === b.line && a.column >= b.column);
+                    // Report columns are one-based; Stryker reads range columns as zero-based.
+                    const inRange = ({ start, end }, range) =>
+                        atOrAfter({ line: start.line, column: start.column - 1 }, range.start)
+                        && atOrAfter(range.end, { line: end.line, column: end.column - 1 });
+
+                    // The plan escapes magic characters as one-character classes for Stryker.
+                    const unescape = (file) => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
+                    const scopes = new Map();
+                    for (const { shard, mutate } of JSON.parse(process.env.MATRIX).include) {
+                        const scope = new Map();
+                        for (const entry of mutate.split(',')) {
+                            const range = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/.exec(entry);
+                            const file = unescape(range ? range[1] : entry);
+                            const current = scope.get(file);
+                            if (!range) {
+                                scope.set(file, true);
+                            } else if (current !== true) {
+                                scope.set(file, [...(current ?? []), {
+                                    start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
+                                    end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
+                                }]);
+                            }
+                        }
+                        scopes.set(shard, scope);
+                    }
+                    const owns = (shard, file, { location }) => {
+                        const ranges = scopes.get(shard)?.get(file);
+                        return ranges === true
+                            || (Array.isArray(ranges) && ranges.some((range) => inRange(location, range)));
+                    };
+
+                    // An artifact whose only files sit under reports/ is stored without that folder. When only one
+                    // artifact matches, it is extracted straight into the target folder, with nothing naming its
+                    // shard: it owns a scope only when the plan had a single shard.
+                    const nested = (() => {
+                        try {
+                            return fs.readdirSync(process.env.SHARDS_DIR)
+                                .some((name) => name.startsWith('mutation-scoped-shard-'));
+                        } catch {
+                            return false;
+                        }
+                    })();
+                    const sources = nested
+                        ? [...scopes.keys()].sort((a, b) => a - b).map((shard) =>
+                            ({ shard, dir: path.join(process.env.SHARDS_DIR, `mutation-scoped-shard-${shard}`) }))
+                        : [{ shard: scopes.size === 1 ? [...scopes.keys()][0] : null, dir: process.env.SHARDS_DIR }];
+                    const read = (dir, name) => {
+                        for (const file of [path.join(dir, 'reports', name), path.join(dir, name)]) {
+                            try {
+                                return JSON.parse(fs.readFileSync(file, 'utf8'));
+                            } catch {}
+                        }
+                        return null;
+                    };
+                    const reports = sources.flatMap(({ shard, dir }) => {
+                        const report = read(dir, 'stryker-incremental.json');
+                        const tests = read(dir, 'stryker-incremental.tests.json');
+                        return report && tests ? [{ shard, report, tests }] : [];
+                    });
+                    if (reports.length === 0) {
+                        console.log('No shard reports to merge.');
+                        process.exit(0);
+                    }
+
+                    // Test ids are numbered per report, so they are rebuilt from test keys.
+                    const tests = new Map();
+                    const testFiles = {};
+                    const idMaps = reports.map(({ report }) => {
+                        const ids = new Map();
+                        for (const [file, testFile] of Object.entries(report.testFiles ?? {})) {
+                            testFiles[file] ??= { ...testFile, tests: [] };
+                            for (const test of testFile.tests ?? []) {
+                                const key = testKey(file, test);
+                                if (!tests.has(key)) {
+                                    tests.set(key, String(tests.size));
+                                    testFiles[file].tests.push({ ...test, id: tests.get(key) });
+                                }
+                                ids.set(test.id, tests.get(key));
+                            }
+                        }
+                        return ids;
+                    });
+
+                    const chosen = new Map();
+                    reports.forEach(({ shard, report }, index) => {
+                        for (const [file, result] of Object.entries(report.files ?? {})) {
+                            const entry = chosen.get(file) ?? { result: null, owned: false, mutants: new Map() };
+                            const owner = scopes.get(shard)?.has(file) ?? false;
+                            if (entry.result === null || (owner && !entry.owned)) {
+                                entry.result = result;
+                                entry.owned = owner;
+                            }
+                            for (const mutant of result.mutants ?? []) {
+                                const key = mutantKey(file, mutant);
+                                const current = entry.mutants.get(key);
+                                const owned = owns(shard, file, mutant);
+                                if (!current || (!current.owned && owned)) {
+                                    entry.mutants.set(key, { mutant, owned, ids: idMaps[index] });
+                                }
+                            }
+                            chosen.set(file, entry);
+                        }
+                    });
+
+                    // A shard's own report is authoritative for its scope: a carried copy it did not report is a
+                    // mutant its code no longer has, so it goes.
+                    const owners = reports.map(({ shard }) => shard).filter((shard) => shard !== null);
+                    let stale = 0;
+                    for (const [file, entry] of chosen) {
+                        for (const [key, { mutant, owned }] of entry.mutants) {
+                            if (!owned && owners.some((shard) => owns(shard, file, mutant))) {
+                                entry.mutants.delete(key);
+                                stale++;
+                            }
+                        }
+                        if (entry.mutants.size === 0 && !entry.owned && owners.some((shard) =>
+                            scopes.get(shard).get(file) === true)) {
+                            chosen.delete(file);
+                        }
+                    }
+
+                    let count = 0;
+                    const remap = (ids, list) => list?.map((id) => ids.get(id)).filter((id) => id !== undefined);
+                    const files = {};
+                    for (const [file, { result, mutants }] of chosen) {
+                        files[file] = {
+                            ...result,
+                            mutants: [...mutants.values()].map(({ mutant, ids }) => ({
+                                ...mutant,
+                                id: String(count++),
+                                killedBy: remap(ids, mutant.killedBy),
+                                coveredBy: remap(ids, mutant.coveredBy),
+                            })),
+                        };
+                    }
+
+                    const merged = { ...reports[0].report, files };
+                    if (reports.some(({ report }) => report.testFiles)) {
+                        merged.testFiles = testFiles;
+                    }
+                    fs.mkdirSync('reports', { recursive: true });
+                    fs.writeFileSync('reports/stryker-incremental.json', JSON.stringify(merged));
+                    // Every shard ran the same commit, so any shard's test file record fits.
+                    fs.writeFileSync('reports/stryker-incremental.tests.json', JSON.stringify(reports[0].tests));
+                    fs.appendFileSync(process.env.GITHUB_OUTPUT, 'merged=true\n');
+                    console.log(`Merged ${reports.length} report(s), ${chosen.size} file(s), ${count} mutant(s);`
+                        + ` dropped ${stale} carried result(s) their owner no longer reports.`);
+                    JS
+
+            -   name: Save merged mutation cache
+                if: ${{ always() && steps.merge.outputs.merged == 'true' }}
+                continue-on-error: true
+                uses: actions/cache/save@v6
+                with:
+                    path: |
+                        reports/stryker-incremental.json
+                        reports/stryker-incremental.tests.json
+                    key: ${{ steps.cache.outputs.prefix }}-all-${{ github.run_id }}-${{ github.run_attempt }}
+
+    # ==========================================================================
+    # JOB: MUTATION (scoped verdict)
+    # ==========================================================================
+    # The required check. It passes only when every shard passed or the scope
+    # was empty, and reports a failure when the run was cancelled.
+    # ==========================================================================
+    mutation:
+        name: Mutation (scoped)
+        needs: [ mutation-plan, mutation-shard ]
+        if: ${{ always() && inputs.run-mutation && github.event_name != 'schedule' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Check the shards
+                env:
+                    PLAN: ${{ needs.mutation-plan.result }}
+                    EMPTY: ${{ needs.mutation-plan.outputs.empty }}
+                    SHARDS: ${{ needs.mutation-shard.result }}
+                run: |
+                    [ "$PLAN" = success ] || { echo "::error::Mutation plan: $PLAN"; exit 1; }
+                    if [ "$EMPTY" = true ] && [ "$SHARDS" = skipped ]; then
                         echo "No mutable source files changed."
                         exit 0
                     fi
-                    npm run test:mutation -- --mutate "$(echo "$files" | paste -sd, -)"
+                    [ "$SHARDS" = success ] || { echo "::error::Mutation shards: $SHARDS"; exit 1; }
 
     # ==========================================================================
     # JOB: MUTATION FULL (scheduled / manual)
@@ -213,8 +913,8 @@ jobs:
 
             -   name: Fingerprint the test environment
                 env:
-                    # As in the scoped job: a rewritten test must not reuse the
-                    # verdict recorded against the old one.
+                    # A rewritten test must not reuse the verdict recorded
+                    # against the old one.
                     HASH: >-
                         ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
                         '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
