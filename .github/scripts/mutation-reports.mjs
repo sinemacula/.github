@@ -67,7 +67,11 @@ const readJson = (file) => {
     }
 };
 
-const isReport = (report) => Boolean(report) && typeof report.files === 'object' && report.files !== null;
+const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const isReport = (report) => isObject(report) && isObject(report.files)
+    && Object.values(report.files).every((result) => isObject(result)
+        && (result.mutants === undefined || Array.isArray(result.mutants)));
 
 // The report only when Stryker wrote it after the marker, so a restored or truncated one never counts.
 export function readFresh(reportPath, markerPath) {
@@ -116,7 +120,14 @@ export function collectShards(dir, prefix, shards, recordName) {
         },
     });
     const found = new Map();
-    if (names.some((name) => name.startsWith(prefix))) {
+    const isDir = (name) => {
+        try {
+            return fs.statSync(path.join(dir, name)).isDirectory();
+        } catch {
+            return false;
+        }
+    };
+    if (names.some((name) => name.startsWith(prefix) && isDir(name))) {
         for (const shard of shards) {
             const base = path.join(dir, `${prefix}${shard}`);
             if (fs.existsSync(base)) {
@@ -125,7 +136,8 @@ export function collectShards(dir, prefix, shards, recordName) {
         }
     } else if (names.length > 0) {
         const record = recordName ? entry(null, dir).read(recordName) : null;
-        const shard = shards.length === 1 ? shards[0] : record?.shard ?? null;
+        const named = record?.shard;
+        const shard = named === undefined ? (shards.length === 1 ? shards[0] : null) : named;
         found.set(shard, entry(shard, dir));
     }
     const missing = shards.filter((shard) => !found.has(shard));
@@ -158,21 +170,21 @@ export function mergeReports(entries, scopes) {
     const chosen = new Map();
     entries.forEach(({ shard, report }, index) => {
         for (const [file, result] of Object.entries(report.files ?? {})) {
-            const entry = chosen.get(file) ?? { result: null, owned: false, mutants: new Map() };
+            const entry = chosen.get(normalise(file)) ?? { result: null, owned: false, mutants: new Map() };
             const owner = scopes.get(shard)?.has(normalise(file)) ?? false;
             if (entry.result === null || (owner && !entry.owned)) {
                 entry.result = result;
                 entry.owned = owner;
             }
             for (const mutant of result.mutants ?? []) {
-                const key = mutantKey(file, mutant);
+                const key = mutantKey(normalise(file), mutant);
                 const current = entry.mutants.get(key);
                 const owned = owns(shard, file, mutant);
                 if (!current || (!current.owned && owned)) {
                     entry.mutants.set(key, { mutant, owned, ids: idMaps[index] });
                 }
             }
-            chosen.set(file, entry);
+            chosen.set(normalise(file), entry);
         }
     });
 
@@ -278,20 +290,22 @@ export function renderHtml(report, cwd = process.cwd()) {
 // Weighs a mutant by the tests it ran, plus one for the run itself.
 export const mutantWeight = (mutant) => 1 + (mutant.testsCompleted ?? mutant.coveredBy?.length ?? 0);
 
-// Seconds per file for the next plan, each shard's measured time shared out by weight within that shard.
+// Seconds per file for the next plan, each shard's measured time shared out by the weight of its own mutants.
 export function measureFiles(report, shards) {
-    const weights = new Map();
-    for (const [file, result] of Object.entries(report.files)) {
-        weights.set(normalise(file), (result.mutants ?? []).reduce((sum, mutant) => sum + mutantWeight(mutant), 0));
-    }
     const files = {};
     for (const { scope, seconds } of shards) {
-        if (!(seconds > 0)) {
-            continue;
+        const weights = new Map([...scope.keys()].map((file) => [file, 0]));
+        for (const [file, result] of Object.entries(report.files)) {
+            for (const mutant of result.mutants ?? []) {
+                if (inScope(scope, file, mutant)) {
+                    weights.set(normalise(file), weights.get(normalise(file)) + mutantWeight(mutant));
+                }
+            }
         }
-        const total = [...scope.keys()].reduce((sum, file) => sum + (weights.get(file) ?? 0), 0);
-        for (const file of scope.keys()) {
-            files[file] = total > 0 ? ((weights.get(file) ?? 0) / total) * seconds : seconds / scope.size;
+        const total = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
+        const time = seconds > 0 ? seconds : 0;
+        for (const [file, weight] of weights) {
+            files[file] = (files[file] ?? 0) + (total > 0 ? (weight / total) * time : time / weights.size);
         }
     }
     return files;
@@ -312,7 +326,7 @@ export function expandMutate(patterns, cwd = process.cwd()) {
         const pattern = RANGE.exec(body)?.[1] ?? body;
         if (negated) {
             for (const file of selected) {
-                if (path.matchesGlob(file, pattern)) {
+                if (path.matchesGlob(file, normalise(pattern, cwd))) {
                     selected.delete(file);
                 }
             }
@@ -336,7 +350,8 @@ export function packFiles(weights, count) {
     const units = [...weights].sort(([a, wa], [b, wb]) => wb - wa || compare(a, b));
     const bins = Array.from({ length: Math.min(count, units.length) }, () => ({ weight: 0, files: [] }));
     for (const [file, weight] of units) {
-        const bin = bins.reduce((least, other) => (other.weight < least.weight ? other : least));
+        const bin = bins.reduce((least, other) => (other.weight < least.weight
+            || (other.weight === least.weight && other.files.length < least.files.length) ? other : least));
         bin.weight += weight;
         bin.files.push(file);
     }

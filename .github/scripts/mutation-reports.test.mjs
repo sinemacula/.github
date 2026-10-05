@@ -58,6 +58,11 @@ describe('readFresh', () => {
         fs.utimesSync(path.join(dir, 'marker'), past, new Date(Date.now() - 120_000));
         assert.equal(readFresh(path.join(dir, 'broken.json'), path.join(dir, 'marker')), null);
         assert.equal(readFresh(path.join(dir, 'missing.json'), path.join(dir, 'marker')), null);
+
+        for (const content of [{ files: [] }, { files: { 'a.ts': null } }, { files: { 'a.ts': { mutants: {} } } }]) {
+            write(path.join(dir, 'odd.json'), content);
+            assert.equal(readFresh(path.join(dir, 'odd.json'), path.join(dir, 'marker')), null);
+        }
     });
 });
 
@@ -103,6 +108,14 @@ describe('collectShards', () => {
         assert.deepEqual(missing, [1]);
     });
 
+    it('trusts a record over the plan, and a file named like a shard is not a folder', () => {
+        const dir = temp();
+        write(path.join(dir, 'shard-record.json'), { shard: 2 });
+        const { found, missing } = collectShards(dir, 'shard-', [1], 'shard-record.json');
+        assert.deepEqual(found.map(({ shard }) => shard), [2]);
+        assert.deepEqual(missing, [1]);
+    });
+
     it('finds nothing in an empty or absent folder', () => {
         assert.deepEqual(collectShards(path.join(temp(), 'none'), 'shard-', [1]).missing, [1]);
     });
@@ -137,6 +150,15 @@ describe('mergeReports', () => {
         ], scopes);
         assert.equal(stale, 1);
         assert.deepEqual(merged.files['b.ts'].mutants.map(({ status }) => status), ['Survived']);
+    });
+
+    it('treats spellings of one path as one file', () => {
+        const scopes = new Map([[1, parseScope('a.ts')]]);
+        const { files, mutants } = mergeReports([
+            { shard: null, report: report({ 'a.ts': [mutant(1, 'Killed'), mutant(2, 'Survived')] }) },
+            { shard: 1, report: report({ './a.ts': [mutant(1, 'Killed'), mutant(2, 'Survived')] }) },
+        ], scopes);
+        assert.deepEqual([files, mutants], [1, 2]);
     });
 });
 
@@ -184,6 +206,7 @@ describe('expandMutate', () => {
         assert.deepEqual(expandMutate(['lib/**/*.ts', '!**/*.test.ts', 'scripts/d.ts:1-2', '', 'none/*.ts'], dir),
             ['lib/a.ts', 'lib/deep/b.ts', 'scripts/d.ts']);
         assert.deepEqual(expandMutate(['**/c.ts'], dir), []);
+        assert.deepEqual(expandMutate(['lib/a.ts', '!./lib/a.ts'], dir), []);
     });
 });
 
@@ -192,6 +215,8 @@ describe('packFiles', () => {
         const bins = packFiles(new Map([['a', 5], ['b', 4], ['c', 3], ['d', 3], ['e', 1]]), 2);
         assert.deepEqual(bins.map(({ weight, files }) => [weight, files]), [[8, ['a', 'd']], [8, ['b', 'c', 'e']]]);
         assert.equal(packFiles(new Map([['a', 1]]), 4).length, 1);
+        assert.deepEqual(packFiles(new Map([['a', 0], ['b', 0], ['c', 0]]), 3).map(({ files }) => files),
+            [['a'], ['b'], ['c']]);
     });
 });
 
@@ -207,6 +232,18 @@ describe('measureFiles', () => {
             { scope: parseScope('c.ts,types.ts'), seconds: 60 },
             { scope: parseScope('d.ts'), seconds: 0 },
         ]);
-        assert.deepEqual(files, { 'a.ts': 300, 'b.ts': 100, 'c.ts': 60, 'types.ts': 0 });
+        assert.deepEqual(files, { 'a.ts': 300, 'b.ts': 100, 'c.ts': 60, 'types.ts': 0, 'd.ts': 0 });
+    });
+
+    it('weighs only the mutants inside each shard, and adds up shards that share a file', () => {
+        const merged = report({
+            'a.ts': [mutant(1, 'Killed', { testsCompleted: 0 }), mutant(20, 'Killed', { testsCompleted: 98 })],
+            'b.ts': [mutant(1, 'Killed', { testsCompleted: 0 })],
+        });
+        const files = measureFiles(merged, [
+            { scope: parseScope('a.ts:1-1,b.ts'), seconds: 20 },
+            { scope: parseScope('a.ts:2-30'), seconds: 30 },
+        ]);
+        assert.deepEqual(files, { 'a.ts': 40, 'b.ts': 10 });
     });
 });
