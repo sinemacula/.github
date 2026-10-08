@@ -22,6 +22,14 @@
 # own reuse rules: it scores them as detected, and retesting one costs a full
 # timeout. The key covers the tooling and the test helpers, fixtures, data
 # files and snapshots. The scheduled sweep forces a full rerun.
+#
+# A full sweep too long for one job splits across `mutation-full-shards`
+# runners by whole files, heaviest first by the last sweep's timings. Each
+# shard defers the break threshold, and the `Mutation (full)` job merges the
+# reports, fails on any missing, stale or unfinished one, and applies the
+# threshold once to the merged score. With one shard the sweep runs as one
+# job, as it always has. Report freshness, merging and scoring live in
+# `.github/scripts`, which the jobs check out at this workflow's own commit.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -55,6 +63,13 @@ on:
                 description: >-
                     Maximum heavy runners the scoped mutation gate splits the changed files across (1 to 256).
                     The required check stays "Mutation (scoped)".
+                type: number
+                required: false
+                default: 1
+            mutation-full-shards:
+                description: >-
+                    Heavy runners the scheduled or manual full sweep splits across (1 to 64). At 1 it runs
+                    unsplit, as before. The verdict stays "Mutation (full)".
                 type: number
                 required: false
                 default: 1
@@ -364,6 +379,7 @@ jobs:
             MUTATE: ${{ matrix.mutate }}
             REPORT: reports/stryker-incremental.json
             TESTS: reports/stryker-incremental.tests.json
+            EMPTY: reports/stryker-incremental.empty.json
 
         steps:
             -   name: Checkout
@@ -381,6 +397,22 @@ jobs:
 
             -   name: Install dependencies
                 run: npm ci
+
+            -   name: Checkout the report scripts
+                uses: actions/checkout@v7
+                with:
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
+
+            # Out of the workspace, so neither Stryker's sandbox nor the tests see them.
+            -   name: Move the report scripts aside
+                run: |
+                    mv .mutation-scripts/.github/scripts "$RUNNER_TEMP/mutation-scripts"
+                    rm -rf .mutation-scripts
+                    echo "MUTATION_REPORTS=$RUNNER_TEMP/mutation-scripts/mutation-reports.mjs" >> "$GITHUB_ENV"
 
             -   name: Name the cache
                 id: cache
@@ -494,6 +526,7 @@ jobs:
                 # related tests, and Stryker fails that as a config error.
                 run: |
                     set -o pipefail
+                    rm -f "$EMPTY"
                     touch "$RUNNER_TEMP/stryker-started"
                     log="$RUNNER_TEMP/stryker.log"
                     status=0
@@ -505,6 +538,9 @@ jobs:
                         && ! grep -Eq 'Instrumented [0-9]+ source file\(s\) with [1-9][0-9]* mutant\(s\)' <<< "$plain" \
                         && grep -Fq 'No tests were executed. Stryker will exit prematurely' <<< "$plain"; then
                         echo "::notice::Shard $SHARD has no mutants in scope."
+                        # Tells the merge this shard has nothing to report, rather than a lost report.
+                        mkdir -p reports
+                        echo '{}' > "$EMPTY"
                         exit 0
                     fi
                     exit "$status"
@@ -515,14 +551,7 @@ jobs:
                 # A restored or truncated report must never be saved, merged or
                 # scored as this run's.
                 run: |
-                    if node -e '
-                        const fs = require("node:fs");
-                        const marker = require("node:path").join(process.env.RUNNER_TEMP, "stryker-started");
-                        const written = fs.existsSync(marker) && fs.existsSync(process.env.REPORT)
-                            && fs.statSync(process.env.REPORT).mtimeMs > fs.statSync(marker).mtimeMs;
-                        const report = written && JSON.parse(fs.readFileSync(process.env.REPORT, "utf8"));
-                        process.exit(report && typeof report.files === "object" && report.files !== null ? 0 : 1);
-                    '; then
+                    if node "$MUTATION_REPORTS" fresh "$REPORT" "$RUNNER_TEMP/stryker-started"; then
                         echo "fresh=true" >> "$GITHUB_OUTPUT"
                     else
                         rm -f "$REPORT" "$TESTS"
@@ -579,76 +608,40 @@ jobs:
                         echo "::notice::No incremental report, so the gate's own verdict stands."
                         exit 0
                     fi
-                    node - <<'JS'
+                    node --input-type=module - <<'JS'
                     // Counts only mutants inside this shard's --mutate entries, by Stryker's range rules.
-                    const fs = require('node:fs');
-                    const path = require('node:path');
-                    const normalise = (file) =>
-                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
-                    const atOrAfter = (a, b) => a.line > b.line || (a.line === b.line && a.column >= b.column);
-                    // Report columns are one-based; Stryker reads range columns as zero-based.
-                    const inRange = ({ start, end }, range) =>
-                        atOrAfter({ line: start.line, column: start.column - 1 }, range.start)
-                        && atOrAfter(range.end, { line: end.line, column: end.column - 1 });
-                    // The plan escapes magic characters as one-character classes for Stryker.
-                    const unescape = (file) => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
-                    const scope = new Map();
-                    for (const entry of process.env.MUTATE.split(',')) {
-                        const range = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/.exec(entry);
-                        const file = normalise(unescape(range ? range[1] : entry));
-                        const current = scope.get(file);
-                        if (!range) {
-                            scope.set(file, true);
-                        } else if (current !== true) {
-                            scope.set(file, [...(current ?? []), {
-                                start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
-                                end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
-                            }]);
-                        }
-                    }
-
+                    import fs from 'node:fs';
+                    const { breaks, inScope, normalise, parseScope, scoreReport, undetectedLines } =
+                        await import(process.env.MUTATION_REPORTS);
+                    const scope = parseScope(process.env.MUTATE);
                     const report = JSON.parse(fs.readFileSync(process.env.REPORT, 'utf8'));
-                    const mutantsByFile = new Map();
-                    for (const [file, result] of Object.entries(report.files)) {
-                        const key = normalise(file);
-                        mutantsByFile.set(key, [...(mutantsByFile.get(key) ?? []), ...(result.mutants ?? [])]);
-                    }
-
-                    let detected = 0;
-                    let timedOut = 0;
-                    const undetected = [];
-                    for (const [file, ranges] of scope) {
-                        const mutants = (mutantsByFile.get(file) ?? []).filter(({ location }) =>
-                            ranges === true || ranges.some((range) => inRange(location, range)));
+                    const files = {};
+                    for (const file of scope.keys()) {
+                        const mutants = Object.entries(report.files)
+                            .filter(([name]) => normalise(name) === file)
+                            .flatMap(([, result]) => result.mutants ?? [])
+                            .filter((mutant) => inScope(scope, file, mutant));
                         if (mutants.length === 0) {
                             console.log(`::warning::No mutants in scope for ${file}.`);
-                        }
-                        for (const mutant of mutants) {
-                            if (['Killed', 'Timeout'].includes(mutant.status)) {
-                                detected++;
-                                timedOut += mutant.status === 'Timeout' ? 1 : 0;
-                            } else if (['Survived', 'NoCoverage'].includes(mutant.status)) {
-                                const replacement = String(mutant.replacement ?? '').replace(/\s+/g, ' ').slice(0, 80);
-                                const { line, column } = mutant.location.start;
-                                undetected.push(
-                                    `${file}:${line}:${column} ${mutant.status} ${mutant.mutatorName} ${replacement}`);
-                            }
+                        } else {
+                            files[file] = { ...report.files[file], mutants };
                         }
                     }
+                    const scoped = { ...report, files };
 
-                    const counted = detected + undetected.length;
+                    const { score, detected, timedOut, undetected, counted } = await scoreReport(scoped);
+                    const lines = undetectedLines(scoped);
                     const threshold = report.thresholds?.break;
-                    const score = counted === 0 ? 100 : (detected / counted) * 100;
                     // A timeout counts as detected, as in Stryker; the count shows how much rests on that.
                     const verdict = counted === 0
                         ? 'In-scope mutation score: no counted mutants.'
                         : `In-scope mutation score: ${score.toFixed(2)} (${detected} detected, ${timedOut} of them`
-                            + ` by timeout, ${undetected.length} undetected).`;
-                    undetected.forEach((line) => console.log(line));
+                            + ` by timeout, ${undetected} undetected).`;
+                    lines.forEach((line) => console.log(line));
                     console.log(verdict);
                     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shard\n\n${verdict}\n`
-                        + (undetected.length ? `\n~~~text\n${undetected.join('\n')}\n~~~\n` : ''));
-                    if (typeof threshold === 'number' && counted > 0 && score < threshold) {
+                        + (lines.length ? `\n~~~text\n${lines.join('\n')}\n~~~\n` : ''));
+                    if (counted > 0 && breaks(score, threshold)) {
                         console.log(`::error::Score ${score.toFixed(2)} is under break threshold ${threshold}.`);
                         process.exit(1);
                     }
@@ -662,6 +655,7 @@ jobs:
                     path: |
                         reports/stryker-incremental.json
                         reports/stryker-incremental.tests.json
+                        reports/stryker-incremental.empty.json
                         build/mutation/
                     if-no-files-found: ignore
                     overwrite: true
@@ -672,8 +666,9 @@ jobs:
     # ==========================================================================
     # GitHub restores a single cache entry, so the shards' reports are merged
     # into one that every shard restores next time. It also runs when the run
-    # is cancelled, so the shards that finished are kept. Best effort: a
-    # failed merge only costs reuse. Runs on the shards' runner so it writes
+    # is cancelled, so the shards that finished are kept; after a run whose
+    # shards all passed, a missing report stops the merge instead. Best effort:
+    # a failed merge only costs reuse. Runs on the shards' runner so it writes
     # to the cache they read.
     # ==========================================================================
     mutation-cache:
@@ -688,6 +683,16 @@ jobs:
                 uses: actions/setup-node@v7
                 with:
                     node-version: ${{ inputs.node-version }}
+
+            -   name: Checkout the report scripts
+                if: ${{ always() }}
+                uses: actions/checkout@v7
+                with:
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
 
             -   name: Name the cache
                 id: cache
@@ -711,166 +716,49 @@ jobs:
                 continue-on-error: true
                 env:
                     MATRIX: ${{ needs.mutation-plan.outputs.matrix }}
+                    SHARDS: ${{ needs.mutation-shard.result }}
                     SHARDS_DIR: ${{ runner.temp }}/shards
                 run: |
-                    node - <<'JS'
-                    // Unions every report by mutant and test key; a shard's own scope wins over carried copies.
-                    const fs = require('node:fs');
-                    const path = require('node:path');
-                    const testKey = (file, test) => {
-                        const start = test.location?.start ?? { line: 0, column: 0 };
-                        return `${file}@${start.line}:${start.column}\n${test.name}`;
-                    };
-                    const mutantKey = (file, { mutatorName, replacement, location: { start, end } }) =>
-                        `${file}@${start.line}:${start.column}-${end.line}:${end.column}\n`
-                        + `${mutatorName}: ${replacement}`;
-                    const atOrAfter = (a, b) => a.line > b.line || (a.line === b.line && a.column >= b.column);
-                    // Report columns are one-based; Stryker reads range columns as zero-based.
-                    const inRange = ({ start, end }, range) =>
-                        atOrAfter({ line: start.line, column: start.column - 1 }, range.start)
-                        && atOrAfter(range.end, { line: end.line, column: end.column - 1 });
+                    node --input-type=module - <<'JS'
+                    import fs from 'node:fs';
+                    const { collectShards, mergeReports, parseScope } =
+                        await import(`${process.cwd()}/.mutation-scripts/.github/scripts/mutation-reports.mjs`);
+                    const plan = JSON.parse(process.env.MATRIX).include;
+                    const scopes = new Map(plan.map(({ shard, mutate }) => [shard, parseScope(mutate)]));
+                    const { found, missing } = collectShards(process.env.SHARDS_DIR, 'mutation-scoped-shard-',
+                        plan.map(({ shard }) => shard));
 
-                    // The plan escapes magic characters as one-character classes for Stryker.
-                    const unescape = (file) => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
-                    const scopes = new Map();
-                    for (const { shard, mutate } of JSON.parse(process.env.MATRIX).include) {
-                        const scope = new Map();
-                        for (const entry of mutate.split(',')) {
-                            const range = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/.exec(entry);
-                            const file = unescape(range ? range[1] : entry);
-                            const current = scope.get(file);
-                            if (!range) {
-                                scope.set(file, true);
-                            } else if (current !== true) {
-                                scope.set(file, [...(current ?? []), {
-                                    start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
-                                    end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
-                                }]);
-                            }
+                    const entries = [];
+                    const unreported = [...missing];
+                    for (const { shard, read } of found) {
+                        const report = read('stryker-incremental.json');
+                        const tests = read('stryker-incremental.tests.json');
+                        if (report && tests) {
+                            entries.push({ shard, report, tests });
+                        } else if (!read('stryker-incremental.empty.json')) {
+                            unreported.push(shard);
                         }
-                        scopes.set(shard, scope);
                     }
-                    const owns = (shard, file, { location }) => {
-                        const ranges = scopes.get(shard)?.get(file);
-                        return ranges === true
-                            || (Array.isArray(ranges) && ranges.some((range) => inRange(location, range)));
-                    };
-
-                    // An artifact whose only files sit under reports/ is stored without that folder. When only one
-                    // artifact matches, it is extracted straight into the target folder, with nothing naming its
-                    // shard: it owns a scope only when the plan had a single shard.
-                    const nested = (() => {
-                        try {
-                            return fs.readdirSync(process.env.SHARDS_DIR)
-                                .some((name) => name.startsWith('mutation-scoped-shard-'));
-                        } catch {
-                            return false;
-                        }
-                    })();
-                    const sources = nested
-                        ? [...scopes.keys()].sort((a, b) => a - b).map((shard) =>
-                            ({ shard, dir: path.join(process.env.SHARDS_DIR, `mutation-scoped-shard-${shard}`) }))
-                        : [{ shard: scopes.size === 1 ? [...scopes.keys()][0] : null, dir: process.env.SHARDS_DIR }];
-                    const read = (dir, name) => {
-                        for (const file of [path.join(dir, 'reports', name), path.join(dir, name)]) {
-                            try {
-                                return JSON.parse(fs.readFileSync(file, 'utf8'));
-                            } catch {}
-                        }
-                        return null;
-                    };
-                    const reports = sources.flatMap(({ shard, dir }) => {
-                        const report = read(dir, 'stryker-incremental.json');
-                        const tests = read(dir, 'stryker-incremental.tests.json');
-                        return report && tests ? [{ shard, report, tests }] : [];
-                    });
-                    if (reports.length === 0) {
+                    if (entries.length === 0) {
                         console.log('No shard reports to merge.');
                         process.exit(0);
                     }
-
-                    // Test ids are numbered per report, so they are rebuilt from test keys.
-                    const tests = new Map();
-                    const testFiles = {};
-                    const idMaps = reports.map(({ report }) => {
-                        const ids = new Map();
-                        for (const [file, testFile] of Object.entries(report.testFiles ?? {})) {
-                            testFiles[file] ??= { ...testFile, tests: [] };
-                            for (const test of testFile.tests ?? []) {
-                                const key = testKey(file, test);
-                                if (!tests.has(key)) {
-                                    tests.set(key, String(tests.size));
-                                    testFiles[file].tests.push({ ...test, id: tests.get(key) });
-                                }
-                                ids.set(test.id, tests.get(key));
-                            }
+                    if (unreported.length > 0) {
+                        if (process.env.SHARDS === 'success') {
+                            console.log(`::error::Shard(s) ${unreported.join(', ')} passed without a report;`
+                                + ' the cache keeps each shard\'s own entry.');
+                            process.exit(1);
                         }
-                        return ids;
-                    });
-
-                    const chosen = new Map();
-                    reports.forEach(({ shard, report }, index) => {
-                        for (const [file, result] of Object.entries(report.files ?? {})) {
-                            const entry = chosen.get(file) ?? { result: null, owned: false, mutants: new Map() };
-                            const owner = scopes.get(shard)?.has(file) ?? false;
-                            if (entry.result === null || (owner && !entry.owned)) {
-                                entry.result = result;
-                                entry.owned = owner;
-                            }
-                            for (const mutant of result.mutants ?? []) {
-                                const key = mutantKey(file, mutant);
-                                const current = entry.mutants.get(key);
-                                const owned = owns(shard, file, mutant);
-                                if (!current || (!current.owned && owned)) {
-                                    entry.mutants.set(key, { mutant, owned, ids: idMaps[index] });
-                                }
-                            }
-                            chosen.set(file, entry);
-                        }
-                    });
-
-                    // A shard's own report is authoritative for its scope: a carried copy it did not report is a
-                    // mutant its code no longer has, so it goes.
-                    const owners = reports.map(({ shard }) => shard).filter((shard) => shard !== null);
-                    let stale = 0;
-                    for (const [file, entry] of chosen) {
-                        for (const [key, { mutant, owned }] of entry.mutants) {
-                            if (!owned && owners.some((shard) => owns(shard, file, mutant))) {
-                                entry.mutants.delete(key);
-                                stale++;
-                            }
-                        }
-                        if (entry.mutants.size === 0 && !entry.owned && owners.some((shard) =>
-                            scopes.get(shard).get(file) === true)) {
-                            chosen.delete(file);
-                        }
+                        console.log(`Shard(s) ${unreported.join(', ')} did not finish; merging the rest.`);
                     }
 
-                    let count = 0;
-                    const remap = (ids, list) => list?.map((id) => ids.get(id)).filter((id) => id !== undefined);
-                    const files = {};
-                    for (const [file, { result, mutants }] of chosen) {
-                        files[file] = {
-                            ...result,
-                            mutants: [...mutants.values()].map(({ mutant, ids }) => ({
-                                ...mutant,
-                                id: String(count++),
-                                killedBy: remap(ids, mutant.killedBy),
-                                coveredBy: remap(ids, mutant.coveredBy),
-                            })),
-                        };
-                    }
-
-                    const merged = { ...reports[0].report, files };
-                    if (reports.some(({ report }) => report.testFiles)) {
-                        merged.testFiles = testFiles;
-                    }
+                    const { report, files, mutants, stale } = mergeReports(entries, scopes);
                     fs.mkdirSync('reports', { recursive: true });
-                    fs.writeFileSync('reports/stryker-incremental.json', JSON.stringify(merged));
+                    fs.writeFileSync('reports/stryker-incremental.json', JSON.stringify(report));
                     // Every shard ran the same commit, so any shard's test file record fits.
-                    fs.writeFileSync('reports/stryker-incremental.tests.json', JSON.stringify(reports[0].tests));
+                    fs.writeFileSync('reports/stryker-incremental.tests.json', JSON.stringify(entries[0].tests));
                     fs.appendFileSync(process.env.GITHUB_OUTPUT, 'merged=true\n');
-                    console.log(`Merged ${reports.length} report(s), ${chosen.size} file(s), ${count} mutant(s);`
+                    console.log(`Merged ${entries.length} report(s), ${files} file(s), ${mutants} mutant(s);`
                         + ` dropped ${stale} carried result(s) their owner no longer reports.`);
                     JS
 
@@ -911,18 +799,210 @@ jobs:
                     [ "$SHARDS" = success ] || { echo "::error::Mutation shards: $SHARDS"; exit 1; }
 
     # ==========================================================================
-    # JOB: MUTATION FULL (scheduled / manual)
+    # JOB: MUTATION FULL PLAN (scheduled / manual)
+    # ==========================================================================
+    # Splits Stryker's `mutate` scope into whole files, so no mutant can fall
+    # between two shards, and balances them by the last sweep's measured time
+    # per file, or by line count for a file it has not timed.
+    # ==========================================================================
+    mutation-full-plan:
+        name: Mutation (full) plan
+        if: ${{ inputs.run-mutation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        runs-on: ubuntu-latest
+
+        outputs:
+            matrix: ${{ steps.count.outputs.matrix || steps.plan.outputs.matrix }}
+            sharded: ${{ steps.count.outputs.sharded }}
+
+        steps:
+            -   name: Check the shard count
+                id: count
+                env:
+                    SHARDS: ${{ inputs.mutation-full-shards }}
+                run: |
+                    if ! [[ "$SHARDS" =~ ^[0-9]+$ ]] || [ "$SHARDS" -lt 1 ] || [ "$SHARDS" -gt 64 ]; then
+                        echo "::error::mutation-full-shards must be an integer from 1 to 64, got '$SHARDS'."
+                        exit 1
+                    fi
+                    if [ "$SHARDS" -eq 1 ]; then
+                        echo 'matrix={"include":[{"shard":1,"mutate":""}]}' >> "$GITHUB_OUTPUT"
+                        echo "sharded=false" >> "$GITHUB_OUTPUT"
+                    else
+                        echo "sharded=true" >> "$GITHUB_OUTPUT"
+                    fi
+
+            -   name: Checkout
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Checkout the report scripts
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                uses: actions/checkout@v7
+                with:
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
+
+            -   name: Move the report scripts aside
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                run: |
+                    mv .mutation-scripts/.github/scripts "$RUNNER_TEMP/mutation-scripts"
+                    rm -rf .mutation-scripts
+                    echo "MUTATION_REPORTS=$RUNNER_TEMP/mutation-scripts/mutation-reports.mjs" >> "$GITHUB_ENV"
+
+            -   name: Setup Node.js
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            -   name: Restore the sweep timings
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                uses: actions/cache/restore@v6
+                with:
+                    path: ${{ runner.temp }}/mutation-full-history.json
+                    key: stryker-full-history-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+                    restore-keys: |
+                        stryker-full-history-v1-${{ runner.os }}-
+
+            -   name: Plan the shards
+                id: plan
+                if: ${{ steps.count.outputs.sharded == 'true' }}
+                env:
+                    SHARDS: ${{ inputs.mutation-full-shards }}
+                    HISTORY: ${{ runner.temp }}/mutation-full-history.json
+                run: |
+                    # Only a scope script needs the dependencies.
+                    if node -e 'process.exit(require("./package.json").scripts?.["mutation:scope:full"] ? 0 : 1)'; then
+                        npm ci
+                    fi
+                    node --input-type=module - <<'JS'
+                    import fs from 'node:fs';
+                    import path from 'node:path';
+                    import { execFileSync } from 'node:child_process';
+                    const { escape, expandMutate, packFiles } = await import(process.env.MUTATION_REPORTS);
+                    // Predicted mutation minutes per shard above which the sweep should take more shards.
+                    const TARGET_MINUTES = 120;
+
+                    const fail = (message) => {
+                        console.log(`::error::${message}`);
+                        process.exit(1);
+                    };
+                    const output = (name, value) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+                    const readJson = (file) => {
+                        try {
+                            return JSON.parse(fs.readFileSync(file, 'utf8'));
+                        } catch {
+                            return null;
+                        }
+                    };
+                    if (typeof fs.globSync !== 'function' || typeof path.matchesGlob !== 'function') {
+                        fail('A sharded full sweep needs Node.js 22.5 or later.');
+                    }
+
+                    let patterns;
+                    let source;
+                    if (readJson('package.json')?.scripts?.['mutation:scope:full']) {
+                        source = 'the mutation:scope:full script';
+                        patterns = execFileSync('npm', ['run', '-s', 'mutation:scope:full'], { encoding: 'utf8' })
+                            .split('\n');
+                    } else {
+                        source = ['stryker.config.json', '.stryker.conf.json'].find((file) => fs.existsSync(file));
+                        if (!source) {
+                            fail('A sharded full sweep reads `mutate` from stryker.config.json or .stryker.conf.json,'
+                                + ' or takes its scope from a mutation:scope:full script.');
+                        }
+                        patterns = readJson(source)?.mutate;
+                        if (!Array.isArray(patterns) || patterns.length === 0) {
+                            fail(`${source} has no \`mutate\` list to split.`);
+                        }
+                    }
+                    const files = expandMutate(patterns);
+                    if (files.length === 0) {
+                        fail(`The scope from ${source} matches no file.`);
+                    }
+                    const comma = files.find((file) => file.includes(','));
+                    if (comma) {
+                        fail(`'${comma}' has a comma, which --mutate cannot carry.`);
+                    }
+
+                    const lines = (file) => {
+                        try {
+                            return fs.readFileSync(file, 'utf8').split('\n').length;
+                        } catch {
+                            return 1;
+                        }
+                    };
+                    const timed = readJson(process.env.HISTORY)?.files ?? null;
+                    const rates = timed ? files.filter((file) => typeof timed[file] === 'number' && lines(file) > 0)
+                        .map((file) => timed[file] / lines(file)).sort((a, b) => a - b) : [];
+                    const perLine = rates.length ? rates[Math.floor(rates.length / 2)] : null;
+                    const weight = (file) => typeof timed?.[file] === 'number'
+                        ? timed[file]
+                        : lines(file) * (perLine ?? 1);
+                    const weights = new Map(files.map((file) => [file, weight(file)]));
+                    const bins = packFiles(weights, Number(process.env.SHARDS));
+                    const minutes = (bin) => (perLine === null ? null : Math.round(bin.weight / 60));
+
+                    const include = bins.map((bin, index) => ({
+                        shard: index + 1,
+                        mutate: bin.files.map(escape).join(','),
+                        predicted: minutes(bin),
+                    }));
+                    output('matrix', JSON.stringify({ include }));
+
+                    const rows = bins.map((bin, index) => `| ${index + 1} | ${bin.files.length} | `
+                        + `${minutes(bin) ?? 'untimed'} | ${bin.files.map((file) => `\`${file}\``).join(' ')} |`);
+                    const summary = ['| Shard | Count | Predicted minutes | Files |', '| --- | --- | --- | --- |',
+                        ...rows].join('\n');
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+                        `### Full mutation shards\n\n${files.length} file(s) from ${source}.\n\n${summary}\n`);
+                    console.log(summary);
+                    const busiest = Math.max(...bins.map((bin) => minutes(bin) ?? 0));
+                    if (busiest > TARGET_MINUTES) {
+                        console.log(`::warning::The busiest of ${bins.length} full mutation shards is predicted to take`
+                            + ` ${busiest} minutes of mutation, over the ${TARGET_MINUTES}-minute target. Raise`
+                            + ' mutation-full-shards before a shard reaches its time limit.');
+                    }
+                    JS
+
+    # ==========================================================================
+    # JOB: MUTATION FULL SHARD (one runner per planned shard)
     # ==========================================================================
     # Blocking, not advisory: this sweep is the safety net for the per-PR
     # scoping, so anything it finds outside the changed files has to be visible
-    # and actionable rather than a silently red-but-passing job.
+    # and actionable rather than a silently red-but-passing job. Unsplit, the
+    # shard is the whole sweep and Stryker's own threshold decides it. Split,
+    # each shard runs every mutant in its files afresh and leaves the threshold
+    # to the merged score; it stops before GitHub's six-hour limit so the
+    # verdict still runs.
     # ==========================================================================
-    mutation-full:
-        name: Mutation (full)
-        if: ${{ inputs.run-mutation && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    mutation-full-shard:
+        name: Mutation (full) shard ${{ matrix.shard }}
+        needs: mutation-full-plan
         runs-on: ${{ inputs.heavy-runner }}
+        timeout-minutes: 345
+
+        strategy:
+            fail-fast: false
+            matrix: ${{ fromJSON(needs.mutation-full-plan.outputs.matrix) }}
+
+        env:
+            MUTATE: ${{ matrix.mutate }}
+            SHARD: ${{ matrix.shard }}
+            SHARDED: ${{ needs.mutation-full-plan.outputs.sharded }}
+            REPORT: reports/stryker-full.json
+            RECORD: reports/stryker-full.shard.json
 
         steps:
+            -   name: Note the start
+                run: echo "JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
             -   name: Checkout
                 uses: actions/checkout@v7
                 with:
@@ -937,42 +1017,374 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
-            -   name: Fingerprint the test environment
-                env:
-                    # A rewritten test must not reuse the verdict recorded
-                    # against the old one.
-                    HASH: >-
-                        ${{ hashFiles('package-lock.json', '**/tsconfig*.json', '**/stryker*.config.*',
-                        '**/vitest.config.*', '**/vitest.workspace.*', '**/*.test.*', '**/*.spec.*',
-                        '**/__tests__/**', '**/__mocks__/**', '**/test-support/**',
-                        '**/__snapshots__/**', '**/*.snap', '!**/node_modules/**') }}
-                run: echo "TEST_ENV_HASH=$HASH" >> "$GITHUB_ENV"
-
-            -   name: Restore mutation incremental cache
-                uses: actions/cache@v6
+            -   name: Checkout the report scripts
+                if: ${{ env.SHARDED == 'true' }}
+                uses: actions/checkout@v7
                 with:
-                    # Where Stryker writes the incremental report. Not the temp
-                    # dir - that is deleted after a successful run.
-                    path: reports/stryker-incremental.json
-                    key: stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-${{ github.sha }}
-                    # This sweep mutates everything and reruns every mutant, so
-                    # there is no out-of-scope report to blend and master's
-                    # cache is a safe warm start for a manual run off-branch.
-                    restore-keys: |
-                        stryker-${{ runner.os }}-${{ github.ref_name }}-${{ env.TEST_ENV_HASH }}-
-                        stryker-${{ runner.os }}-master-${{ env.TEST_ENV_HASH }}-
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
+
+            # Out of the workspace, so neither Stryker's sandbox nor the tests see them.
+            -   name: Move the report scripts aside
+                if: ${{ env.SHARDED == 'true' }}
+                run: |
+                    mv .mutation-scripts/.github/scripts "$RUNNER_TEMP/mutation-scripts"
+                    rm -rf .mutation-scripts
+                    echo "MUTATION_REPORTS=$RUNNER_TEMP/mutation-scripts/mutation-reports.mjs" >> "$GITHUB_ENV"
 
             -   name: Full mutation suite
+                if: ${{ env.SHARDED != 'true' }}
                 # `incremental` is read on every run, so without `--force` the
                 # sweep would reuse the cache and stop being a full rerun. The
                 # flag reruns every mutant and rewrites the report, which keeps
                 # this working without a second npm script in every consumer.
                 run: npm run test:mutation -- --force
 
+            # `--incremental` makes Stryker write the JSON report the merge needs,
+            # whatever reporters the caller configures. A shard whose files hold
+            # no mutants finds no related tests, and Stryker fails that as a
+            # config error.
+            -   name: Full mutation shard
+                if: ${{ env.SHARDED == 'true' }}
+                run: |
+                    set -o pipefail
+                    rm -f "$REPORT" "$RECORD"
+                    mkdir -p reports
+                    marker="$RUNNER_TEMP/stryker-started"
+                    log="$RUNNER_TEMP/stryker.log"
+                    dry_run_done="$RUNNER_TEMP/dry-run-done"
+                    touch "$marker"
+                    started=$(date +%s)
+                    status=0
+                    npm run test:mutation -- --incremental --force --incrementalFile "$REPORT" --mutate "$MUTATE" 2>&1 \
+                        | awk -v done="$dry_run_done" '!seen && /Initial test run succeeded/ {
+                            seen = 1; system("date +%s > " done)
+                        } { print; fflush() }' | tee "$log" || status=$?
+                    finished=$(date +%s)
+                    plain=$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$log")
+
+                    fresh=false
+                    if node "$MUTATION_REPORTS" fresh "$REPORT" "$marker"; then
+                        fresh=true
+                    else
+                        rm -f "$REPORT"
+                    fi
+                    outcome=failed
+                    if [ "$status" -eq 0 ] && [ "$fresh" = true ]; then
+                        outcome=passed
+                    elif grep -Eq 'Instrumented [1-9][0-9]* source file\(s\) with 0 mutant\(s\)' <<< "$plain" \
+                        && ! grep -Eq 'Instrumented [0-9]+ source file\(s\) with [1-9][0-9]* mutant\(s\)' <<< "$plain" \
+                        && grep -Fq 'No tests were executed. Stryker will exit prematurely' <<< "$plain"; then
+                        outcome=empty
+                    elif [ "$status" -eq 1 ] && [ "$fresh" = true ] && grep -Eq \
+                        'Final mutation score [0-9.]+ under breaking threshold [0-9.]+, setting exit code to 1' \
+                        <<< "$plain"; then
+                        outcome=deferred
+                    fi
+
+                    instrumented=$(grep -Eo 'Instrumented [0-9]+ source file\(s\) with [0-9]+ mutant\(s\)' \
+                        <<< "$plain" | tail -n 1 || true)
+                    INSTRUMENTED="$instrumented" OUTCOME="$outcome" STATUS="$status" FRESH="$fresh" \
+                        STARTED="$started" FINISHED="$finished" DRY_RUN_DONE="$dry_run_done" node - <<'JS'
+                    const fs = require('node:fs');
+                    const crypto = require('node:crypto');
+                    const env = process.env;
+                    const counts = /Instrumented (\d+) source file\(s\) with (\d+) mutant\(s\)/.exec(env.INSTRUMENTED);
+                    let dryRunDone = null;
+                    try {
+                        dryRunDone = Number(fs.readFileSync(env.DRY_RUN_DONE, 'utf8').trim());
+                    } catch {}
+                    const record = {
+                        shard: Number(env.SHARD),
+                        run: env.GITHUB_RUN_ID,
+                        attempt: Number(env.GITHUB_RUN_ATTEMPT),
+                        outcome: env.OUTCOME,
+                        status: Number(env.STATUS),
+                        fresh: env.FRESH === 'true',
+                        instrumentedFiles: counts ? Number(counts[1]) : null,
+                        instrumentedMutants: counts ? Number(counts[2]) : null,
+                        jobStarted: Number(env.JOB_STARTED),
+                        started: Number(env.STARTED),
+                        dryRunDone,
+                        finished: Number(env.FINISHED),
+                        digest: env.FRESH === 'true'
+                            ? crypto.createHash('sha256').update(fs.readFileSync(env.REPORT)).digest('hex')
+                            : null,
+                    };
+                    fs.writeFileSync(env.RECORD, JSON.stringify(record));
+                    console.log(JSON.stringify(record));
+                    JS
+
+                    case "$outcome" in
+                        passed) exit 0 ;;
+                        empty) echo "::notice::Shard $SHARD has no mutants." ;;
+                        deferred)
+                            echo "::notice::Shard $SHARD is under the break threshold alone; the merged score decides."
+                            ;;
+                        *) exit "$(( status == 0 ? 1 : status ))" ;;
+                    esac
+
+            -   name: Upload shard report
+                if: ${{ always() && env.SHARDED == 'true' }}
+                uses: actions/upload-artifact@v7
+                with:
+                    name: mutation-full-shard-${{ matrix.shard }}
+                    path: |
+                        reports/stryker-full.json
+                        reports/stryker-full.shard.json
+                    if-no-files-found: ignore
+                    overwrite: true
+                    retention-days: 7
+
             -   name: Upload mutation report
-                if: always()
+                if: ${{ always() && env.SHARDED != 'true' }}
                 uses: actions/upload-artifact@v7
                 with:
                     name: mutation-report
                     path: build/mutation/
                     retention-days: 30
+
+    # ==========================================================================
+    # JOB: MUTATION FULL (verdict)
+    # ==========================================================================
+    # Unsplit, it passes when the one shard did. Split, it fails on any shard
+    # without a fresh, finished report of exactly its own files, then merges
+    # the reports, scores them with Stryker's own metrics and applies the break
+    # threshold once. A static mutant's timeout scales with its shard's dry
+    # run, so static timeouts are counted per shard. The merged report is
+    # published, and the timings saved for the next plan.
+    # ==========================================================================
+    mutation-full:
+        name: Mutation (full)
+        needs: [ mutation-full-plan, mutation-full-shard ]
+        if: >-
+            ${{ always() && inputs.run-mutation
+            && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        runs-on: ubuntu-latest
+
+        env:
+            SHARDED: ${{ needs.mutation-full-plan.outputs.sharded }}
+
+        steps:
+            -   name: Check the shard
+                if: ${{ env.SHARDED != 'true' }}
+                env:
+                    PLAN: ${{ needs.mutation-full-plan.result }}
+                    SHARDS: ${{ needs.mutation-full-shard.result }}
+                run: |
+                    [ "$PLAN" = success ] || { echo "::error::Mutation (full) plan: $PLAN"; exit 1; }
+                    [ "$SHARDS" = success ] || { echo "::error::Mutation (full) shard: $SHARDS"; exit 1; }
+
+            -   name: Checkout
+                if: ${{ env.SHARDED == 'true' }}
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Checkout the report scripts
+                if: ${{ env.SHARDED == 'true' }}
+                uses: actions/checkout@v7
+                with:
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                if: ${{ env.SHARDED == 'true' }}
+                uses: actions/setup-node@v7
+                with:
+                    node-version: ${{ inputs.node-version }}
+                    cache: npm
+
+            # Stryker's own install supplies the scoring and report packages.
+            -   name: Install dependencies
+                if: ${{ env.SHARDED == 'true' }}
+                run: npm ci --ignore-scripts
+
+            -   name: Download shard reports
+                if: ${{ env.SHARDED == 'true' }}
+                continue-on-error: true
+                uses: actions/download-artifact@v8
+                with:
+                    pattern: mutation-full-shard-*
+                    path: ${{ runner.temp }}/shards
+
+            -   name: Merge and score the shards
+                id: verdict
+                if: ${{ env.SHARDED == 'true' }}
+                env:
+                    MATRIX: ${{ needs.mutation-full-plan.outputs.matrix }}
+                    SHARDS: ${{ needs.mutation-full-shard.result }}
+                    SHARDS_DIR: ${{ runner.temp }}/shards
+                    HISTORY: ${{ runner.temp }}/mutation-full-history.json
+                run: |
+                    node --input-type=module - <<'JS'
+                    import fs from 'node:fs';
+                    import crypto from 'node:crypto';
+                    const lib = await import(`${process.cwd()}/.mutation-scripts/.github/scripts/mutation-reports.mjs`);
+                    const LIMIT_MINUTES = 345;
+
+                    const summary = (text) => fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+                    const output = (name, value) => fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
+                    const minutes = (from, to) => (from && to ? ((to - from) / 60).toFixed(0) : '-');
+                    const plan = JSON.parse(process.env.MATRIX).include;
+                    const scopes = new Map(plan.map(({ shard, mutate }) => [shard, lib.parseScope(mutate)]));
+                    const problems = [];
+                    if (process.env.SHARDS !== 'success') {
+                        problems.push(`The shards ended ${process.env.SHARDS}.`);
+                    }
+
+                    const { found, missing } = lib.collectShards(process.env.SHARDS_DIR, 'mutation-full-shard-',
+                        plan.map(({ shard }) => shard), 'stryker-full.shard.json');
+                    missing.forEach((shard) => problems.push(`Shard ${shard} uploaded nothing.`));
+
+                    const entries = [];
+                    const rows = [];
+                    for (const { shard, locate, read } of found.sort((a, b) => a.shard - b.shard)) {
+                        if (shard === null) {
+                            problems.push('A shard artifact names no shard.');
+                            continue;
+                        }
+                        const scope = scopes.get(shard);
+                        const record = read('stryker-full.shard.json');
+                        if (!record || record.shard !== shard || String(record.run) !== process.env.GITHUB_RUN_ID) {
+                            problems.push(`Shard ${shard} has no record from this run.`);
+                            continue;
+                        }
+                        if (record.instrumentedFiles !== scope.size) {
+                            problems.push(`Shard ${shard} instrumented ${record.instrumentedFiles ?? 'no'} of its`
+                                + ` ${scope.size} file(s); Stryker ignored or could not read the rest.`);
+                        }
+                        const elapsed = (record.finished - record.jobStarted) / 60;
+                        if (elapsed > LIMIT_MINUTES / 2) {
+                            console.log(`::warning::Full mutation shard ${shard} took ${elapsed.toFixed(0)} minutes,`
+                                + ` over half its ${LIMIT_MINUTES}-minute limit. Raise mutation-full-shards.`);
+                        }
+                        const row = { shard, record, files: scope.size, mutants: 0, statics: 0, staticTimeouts: 0 };
+                        rows.push(row);
+                        if (record.outcome === 'empty') {
+                            if (record.instrumentedMutants !== 0) {
+                                problems.push(`Shard ${shard} reported no mutants after instrumenting some.`);
+                            }
+                            continue;
+                        }
+                        if (!['passed', 'deferred'].includes(record.outcome) || !record.fresh) {
+                            problems.push(`Shard ${shard} ${record.outcome} with exit code ${record.status}.`);
+                            continue;
+                        }
+                        const file = locate('stryker-full.json');
+                        const report = file && read('stryker-full.json');
+                        if (!report) {
+                            problems.push(`Shard ${shard} has no report.`);
+                            continue;
+                        }
+                        const digest = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+                        if (digest !== record.digest) {
+                            problems.push(`Shard ${shard}'s report is not the one it recorded.`);
+                            continue;
+                        }
+                        problems.push(...lib.reportProblems(report, scope).map((text) => `Shard ${shard} ${text}.`));
+                        for (const result of Object.values(report.files)) {
+                            for (const mutant of result.mutants ?? []) {
+                                row.mutants++;
+                                row.statics += mutant.static ? 1 : 0;
+                                row.staticTimeouts += mutant.static && mutant.status === 'Timeout' ? 1 : 0;
+                            }
+                        }
+                        if (row.mutants !== record.instrumentedMutants) {
+                            problems.push(`Shard ${shard} reported ${row.mutants} of its`
+                                + ` ${record.instrumentedMutants} mutant(s).`);
+                        }
+                        entries.push({ shard, report });
+                    }
+
+                    const cells = (values) => `| ${values.join(' | ')} |`;
+                    const table = [
+                        cells(['Shard', 'Files', 'Mutants', 'Static', 'Static timeouts', 'Dry run (min)',
+                            'Mutation (min)', 'Job (min)', 'Outcome']),
+                        cells(Array(9).fill('---')),
+                        ...rows.map(({ shard, record, files, mutants, statics, staticTimeouts }) => cells([shard, files,
+                            mutants, statics, staticTimeouts, minutes(record.started, record.dryRunDone),
+                            minutes(record.dryRunDone, record.finished), minutes(record.jobStarted, record.finished),
+                            record.outcome])),
+                    ].join('\n');
+                    summary(`### Full mutation shards\n\n${table}\n`);
+                    console.log(table);
+
+                    if (problems.length > 0) {
+                        problems.forEach((problem) => console.log(`::error::${problem}`));
+                        summary(`\n${problems.map((problem) => `- ${problem}`).join('\n')}\n`);
+                        process.exit(1);
+                    }
+                    if (entries.length === 0) {
+                        console.log('::error::No shard reported a mutant.');
+                        process.exit(1);
+                    }
+
+                    const { report, mutants } = lib.mergeReports(entries, scopes);
+                    const expected = rows.reduce((sum, row) => sum + row.mutants, 0);
+                    if (mutants !== expected) {
+                        console.log(`::error::The merge kept ${mutants} of ${expected} mutant(s).`);
+                        process.exit(1);
+                    }
+                    fs.mkdirSync('build/mutation', { recursive: true });
+                    fs.writeFileSync('build/mutation/mutation.json', JSON.stringify(report));
+                    fs.writeFileSync('build/mutation/mutation.html', lib.renderHtml(report));
+                    output('merged', 'true');
+
+                    const timings = lib.measureFiles(report, rows.map(({ shard, record }) => ({
+                        scope: scopes.get(shard),
+                        seconds: record.outcome === 'empty'
+                            ? 0
+                            : record.finished - (record.dryRunDone ?? record.started),
+                    })));
+                    for (const { shard, record } of rows) {
+                        if (record.outcome === 'empty') {
+                            scopes.get(shard).forEach((_, file) => {
+                                timings[file] = 0;
+                            });
+                        }
+                    }
+                    fs.writeFileSync(process.env.HISTORY, JSON.stringify({ version: 1, files: timings }));
+                    output('history', 'true');
+
+                    const { score, detected, timedOut, undetected, counted } = await lib.scoreReport(report);
+                    const threshold = report.thresholds?.break;
+                    const verdict = counted === 0
+                        ? 'Mutation score: no counted mutants.'
+                        : `Mutation score: ${score.toFixed(2)} (${detected} detected, ${timedOut} of them by timeout,`
+                            + ` ${undetected} undetected) across ${entries.length} shard(s), ${mutants} mutant(s).`;
+                    const lines = lib.undetectedLines(report);
+                    lines.forEach((line) => console.log(line));
+                    console.log(verdict);
+                    const listed = lines.slice(0, 500);
+                    summary(`\n${verdict}\n` + (listed.length ? `\n~~~text\n${listed.join('\n')}\n~~~\n` : '')
+                        + (lines.length > listed.length
+                            ? `\n${lines.length - listed.length} more in the report.\n`
+                            : ''));
+                    if (lib.breaks(score, threshold)) {
+                        console.log(`::error::Score ${score.toFixed(2)} is under break threshold ${threshold}.`);
+                        process.exit(1);
+                    }
+                    JS
+
+            -   name: Upload mutation report
+                if: ${{ always() && steps.verdict.outputs.merged == 'true' }}
+                uses: actions/upload-artifact@v7
+                with:
+                    name: mutation-report
+                    path: build/mutation/
+                    retention-days: 30
+
+            -   name: Save the sweep timings
+                if: ${{ always() && steps.verdict.outputs.history == 'true' }}
+                continue-on-error: true
+                uses: actions/cache/save@v6
+                with:
+                    path: ${{ runner.temp }}/mutation-full-history.json
+                    key: stryker-full-history-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
