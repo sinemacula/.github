@@ -30,7 +30,7 @@ runs:
     using: composite
     steps:
         -   name: Setup PHP
-            uses: shivammathur/setup-php@v2
+            uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
             with:
                 php-version: ${{ inputs.php-version }}
                 extensions: ${{ inputs.extensions }}
@@ -48,7 +48,7 @@ runs:
                 owner: ${{ github.repository_owner }}
 
         -   name: Cache dependencies
-            uses: actions/cache@v5
+            uses: actions/cache@v6
             with:
                 path: |
                     ~/.composer/cache
