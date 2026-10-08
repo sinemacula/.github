@@ -1,0 +1,6 @@
+# actionlint does not know the job context's workflow_repository and
+# workflow_sha yet; GitHub documents both for reusable workflows.
+paths:
+    .github/workflows/**/*.yml:
+        ignore:
+            - property "workflow_(repository|sha)" is not defined in object type

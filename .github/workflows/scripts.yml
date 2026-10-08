@@ -1,0 +1,45 @@
+# ==============================================================================
+# SCRIPTS
+# ==============================================================================
+# Tests the scripts the reusable workflows check out at their own commit.
+# ==============================================================================
+name: Scripts
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    pull_request:
+        paths: [ .github/scripts/** ]
+    push:
+        branches: [ master ]
+        paths: [ .github/scripts/** ]
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: read
+
+jobs:
+
+    # ==========================================================================
+    # JOB: TEST
+    # ==========================================================================
+    test:
+        name: Script tests
+        runs-on: ubuntu-latest
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   name: Setup Node.js
+                uses: actions/setup-node@v7
+                with:
+                    node-version: '22'
+
+            -   name: Test
+                run: node --test '.github/scripts/*.test.mjs'
