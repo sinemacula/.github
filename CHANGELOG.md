@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/sinemacula/.github/compare/v1.9.1...v1.10.0) (2026-10-08)
+
+
+### Features
+
+* **mutation:** split the full sweep across runners ([#68](https://github.com/sinemacula/.github/issues/68)) ([da16784](https://github.com/sinemacula/.github/commit/da1678423be3c823391025627ca051a9fa301209))
+
 ## [1.9.1](https://github.com/sinemacula/.github/compare/v1.9.0...v1.9.1) (2026-09-29)
 
 
