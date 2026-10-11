@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/sinemacula/.github/compare/v1.10.0...v1.11.0) (2026-10-11)
+
+
+### Features
+
+* **mutation:** balance the scoped shards by expected time ([#71](https://github.com/sinemacula/.github/issues/71)) ([b55a0a1](https://github.com/sinemacula/.github/commit/b55a0a1bb05be3c4971bfe9440c1960b12c8b166))
+
 ## [1.10.0](https://github.com/sinemacula/.github/compare/v1.9.1...v1.10.0) (2026-10-08)
 
 
