@@ -13,23 +13,27 @@
 # `test:mutation` scripts for the jobs it runs.
 #
 # The scoped gate splits the changed files across up to `mutation-shards`
-# runners, and each shard must meet the break threshold both in Stryker's
-# figure and on its own scope. With Stryker's `incremental` option each
-# shard's report is cached, and the reports are merged and restored only from
-# the branch's own runs. Cached survivors and static non-kills always rerun,
-# and so does a kill whose test file changed at all: Stryker only sees an edit
-# that falls inside a test's own lines. Cached timeouts are left to Stryker's
-# own reuse rules: it scores them as detected, and retesting one costs a full
-# timeout. The key covers the tooling and the test helpers, fixtures, data
-# files and snapshots. The scheduled sweep forces a full rerun.
+# runners, balanced by the time the last sharded full sweep measured on those
+# files and lines, or by line count until there is one. Each shard must meet
+# the break threshold both in Stryker's figure and on its own scope. With
+# Stryker's `incremental` option each shard's report is cached, and the
+# reports are merged and restored only from the branch's own runs. Cached
+# survivors and static non-kills always rerun, and so does a kill whose test
+# file changed at all: Stryker only sees an edit that falls inside a test's
+# own lines. Cached timeouts are left to Stryker's own reuse rules: it scores
+# them as detected, and retesting one costs a full timeout. The key covers the
+# tooling and the test helpers, fixtures, data files and snapshots. The
+# scheduled sweep forces a full rerun.
 #
 # A full sweep too long for one job splits across `mutation-full-shards`
-# runners by whole files, heaviest first by the last sweep's timings. Each
-# shard defers the break threshold, and the `Mutation (full)` job merges the
-# reports, fails on any missing, stale or unfinished one, and applies the
-# threshold once to the merged score. With one shard the sweep runs as one
-# job, as it always has. Report freshness, merging and scoring live in
-# `.github/scripts`, which the jobs check out at this workflow's own commit.
+# runners by whole files, heaviest first by the last sweep's timings. Within a
+# shard, its time is shared out by the tests each mutant ran, each test
+# weighed by how much of the code it covers. Each shard defers the break
+# threshold, and the `Mutation (full)` job merges the reports, fails on any
+# missing, stale or unfinished one, and applies the threshold once to the
+# merged score. With one shard the sweep runs as one job, as it always has.
+# Report freshness, merging and scoring live in `.github/scripts`, which the
+# jobs check out at this workflow's own commit.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -183,20 +187,47 @@ jobs:
             -   name: Install dependencies
                 run: npm ci
 
+            -   name: Checkout the report scripts
+                uses: actions/checkout@v7
+                with:
+                    repository: ${{ job.workflow_repository }}
+                    ref: ${{ job.workflow_sha }}
+                    path: .mutation-scripts
+                    sparse-checkout: .github/scripts
+                    persist-credentials: false
+
+            # Out of the workspace, so neither the scope script nor the fingerprint sees them.
+            -   name: Move the report scripts aside
+                run: |
+                    mv .mutation-scripts/.github/scripts "$RUNNER_TEMP/mutation-scripts"
+                    rm -rf .mutation-scripts
+                    echo "MUTATION_REPORTS=$RUNNER_TEMP/mutation-scripts/mutation-reports.mjs" >> "$GITHUB_ENV"
+
+            # The default branch's last sharded full sweep, which pull requests can read.
+            -   name: Restore the sweep timings
+                uses: actions/cache/restore@v6
+                with:
+                    path: ${{ runner.temp }}/mutation-full-history.json
+                    key: stryker-full-history-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+                    restore-keys: |
+                        stryker-full-history-v1-${{ runner.os }}-
+
             -   name: Plan the shards
                 id: plan
                 env:
                     BASE_REF: ${{ github.base_ref || 'master' }}
                     SHARDS: ${{ inputs.mutation-shards }}
                     SCOPE_FILE: ${{ runner.temp }}/scope.txt
+                    HISTORY: ${{ runner.temp }}/mutation-full-history.json
                 run: |
                     npm run -s mutation:scope -- --base "origin/${BASE_REF}" > "$SCOPE_FILE"
-                    node - <<'JS'
-                    // Splits the scope into balanced shards and fingerprints what the tests read.
-                    const fs = require('node:fs');
-                    const crypto = require('node:crypto');
-                    const path = require('node:path');
-                    const { execFileSync } = require('node:child_process');
+                    node --input-type=module - <<'JS'
+                    // Splits the scope into shards balanced by expected time and fingerprints what the tests read.
+                    import fs from 'node:fs';
+                    import crypto from 'node:crypto';
+                    import path from 'node:path';
+                    import { execFileSync } from 'node:child_process';
+                    const { escape, estimateScope, normalise, planScope } = await import(process.env.MUTATION_REPORTS);
 
                     const fail = (message) => {
                         console.log(`::error::${message}`);
@@ -234,15 +265,13 @@ jobs:
                         fail(`mutation-shards must be an integer from 1 to 256, got '${process.env.SHARDS}'.`);
                     }
 
-                    const lineCount = (file) => {
+                    const lines = (file) => {
                         try {
                             return fs.readFileSync(file, 'utf8').split('\n').length;
                         } catch {
-                            return 1;
+                            return null;
                         }
                     };
-                    const normalise = (file) =>
-                        path.relative(process.cwd(), path.resolve(file)).split(path.sep).join('/');
                     let tracked;
                     // Extended globs count too: @(a|b), +(a), !(a), ?(a), *(a) and a|b inside parentheses.
                     const isGlob = (pattern) => /[*?[\]{}]|[@+!]\(|\([^)]*\|/.test(pattern) && !fs.existsSync(pattern);
@@ -295,63 +324,56 @@ jobs:
                             if (file.includes(',')) {
                                 fail(`Scope entry '${text}' matches '${file}', whose comma --mutate cannot carry.`);
                             }
-                            const weight = range ? end - start + 1 : lineCount(file);
+                            const weight = range ? end - start + 1 : lines(file) ?? 1;
                             const entry = range ? `${file}:${range[2]}` : file;
-                            scoped.set(entry, { path: file, start, text: entry, weight, range: Boolean(range) });
+                            scoped.set(entry, { path: file, start, end, text: entry, weight, range: Boolean(range) });
                         }
                     }
-                    const byPath = new Map();
-                    for (const entry of scoped.values()) {
-                        byPath.set(entry.path, [...(byPath.get(entry.path) ?? []), entry]);
-                    }
-
-                    if (byPath.size === 0) {
+                    if (scoped.size === 0) {
                         console.log('No mutable source files changed.');
                         output('empty', 'true');
                         output('matrix', JSON.stringify({ include: [] }));
                         process.exit(0);
                     }
 
-                    const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-                    const weigh = (entries) => entries.reduce((sum, entry) => sum + entry.weight, 0);
-                    const files = [...byPath.keys()].sort(compare).map((file) => byPath.get(file));
-                    const total = files.reduce((sum, entries) => sum + weigh(entries), 0);
-
-                    // A dominating file with several ranges is split by range; a range is never cut.
-                    const units = files.flatMap((entries) =>
-                        weigh(entries) > total / shards && entries.length > 1 && entries.every((entry) => entry.range)
-                            ? entries.map((entry) => ({ key: entry.text, weight: entry.weight, entries: [entry] }))
-                            : [{ key: entries[0].path, weight: weigh(entries), entries }]);
-                    units.sort((a, b) => b.weight - a.weight || compare(a.key, b.key));
-
-                    const count = Math.min(shards, units.length);
-                    const bins = Array.from({ length: count }, () => ({ weight: 0, entries: [] }));
-                    for (const unit of units) {
-                        const bin = bins.reduce((least, other) => (other.weight < least.weight ? other : least));
-                        bin.weight += unit.weight;
-                        bin.entries.push(...unit.entries);
+                    // Without a sharded full sweep to go by, the scope is balanced by line count, as before.
+                    const entries = [...scoped.values()];
+                    let history = null;
+                    try {
+                        history = JSON.parse(fs.readFileSync(process.env.HISTORY, 'utf8'));
+                    } catch {}
+                    let costs = null;
+                    try {
+                        costs = estimateScope(entries, history, lines);
+                    } catch (error) {
+                        console.log(`::warning::Could not estimate the shards' cost (${error.message}).`);
                     }
+                    const bins = planScope(entries, costs ?? entries.map(({ weight }) => weight), shards);
 
                     // Every entry is a real path now, but Stryker matches --mutate entries with minimatch after
                     // turning backslashes into slashes, so each magic character becomes a one-character class.
                     // A leading ! would read as an exclusion, so such a path starts with ./ instead.
-                    const escape = (file) => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
-                    const include = bins.map((bin, index) => {
-                        bin.entries.sort((a, b) => compare(a.path, b.path) || a.start - b.start);
-                        const mutate = bin.entries
-                            .map((entry) => escape(entry.path) + entry.text.slice(entry.path.length))
-                            .join(',');
-                        return { shard: index + 1, mutate };
-                    });
+                    const include = bins.map((bin, index) => ({
+                        shard: index + 1,
+                        mutate: bin.entries.map((entry) => escape(entry.path) + entry.text.slice(entry.path.length))
+                            .join(','),
+                    }));
                     output('empty', 'false');
                     output('matrix', JSON.stringify({ include }));
 
+                    const basis = costs
+                        ? 'Balanced by the last full sweep\'s timings.'
+                        : 'No full sweep timings to go by, so balanced by line count.';
                     const rows = bins.map((bin, index) => {
                         const entries = bin.entries.map((entry) => `\`${entry.text}\``).join(' ');
-                        return `| ${index + 1} | ${bin.weight} | ${entries} |`;
+                        const estimate = costs ? (bin.weight / 60).toFixed(1) : bin.weight;
+                        return `| ${index + 1} | ${estimate} | ${entries} |`;
                     });
-                    const summary = ['| Shard | Weight | Entries |', '| --- | --- | --- |', ...rows].join('\n');
-                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shards\n\n${summary}\n`);
+                    const heading = `| Shard | ${costs ? 'Estimated minutes' : 'Lines'} | Entries |`;
+                    const summary = [heading, '| --- | --- | --- |', ...rows].join('\n');
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+                        `### Mutation shards\n\n${basis}\n\n${summary}\n`);
+                    console.log(basis);
                     console.log(summary);
                     JS
 
@@ -1337,7 +1359,7 @@ jobs:
                     fs.writeFileSync('build/mutation/mutation.html', lib.renderHtml(report));
                     output('merged', 'true');
 
-                    const timings = lib.measureFiles(report, rows.map(({ shard, record }) => ({
+                    const timings = lib.measureSweep(report, rows.map(({ shard, record }) => ({
                         scope: scopes.get(shard),
                         seconds: record.outcome === 'empty'
                             ? 0
@@ -1346,11 +1368,11 @@ jobs:
                     for (const { shard, record } of rows) {
                         if (record.outcome === 'empty') {
                             scopes.get(shard).forEach((_, file) => {
-                                timings[file] = 0;
+                                timings.files[file] = 0;
                             });
                         }
                     }
-                    fs.writeFileSync(process.env.HISTORY, JSON.stringify({ version: 1, files: timings }));
+                    fs.writeFileSync(process.env.HISTORY, JSON.stringify({ version: 2, ...timings }));
                     output('history', 'true');
 
                     const { score, detected, timedOut, undetected, counted } = await lib.scoreReport(report);

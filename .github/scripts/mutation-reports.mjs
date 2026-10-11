@@ -10,6 +10,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
+const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 const RANGE = /^(.*?):((\d+)(?::(\d+))?-(\d+)(?::(\d+))?)$/;
 
 export const normalise = (file, cwd = process.cwd()) =>
@@ -287,28 +289,143 @@ export function renderHtml(report, cwd = process.cwd()) {
 `;
 }
 
-// Weighs a mutant by the tests it ran, plus one for the run itself.
-export const mutantWeight = (mutant) => 1 + (mutant.testsCompleted ?? mutant.coveredBy?.length ?? 0);
+// Each test's cost as the number of mutants it covers against the average test's: a test that drives the whole
+// application runs far longer than one that drives a single function, and the report records no test times.
+export function testCosts(report) {
+    const covers = new Map();
+    for (const result of Object.values(report.files ?? {})) {
+        for (const mutant of result.mutants ?? []) {
+            for (const id of mutant.coveredBy ?? []) {
+                covers.set(id, (covers.get(id) ?? 0) + 1);
+            }
+        }
+    }
+    const mean = [...covers.values()].reduce((sum, count) => sum + count, 0) / covers.size;
+    return new Map([...covers].map(([id, count]) => [id, count / mean]));
+}
 
-// Seconds per file for the next plan, each shard's measured time shared out by the weight of its own mutants.
-export function measureFiles(report, shards) {
+// Weighs a mutant by the cost of the tests it ran, plus one for the run itself. A static mutant runs every
+// test, so each counts as the average.
+export function mutantWeight(mutant, costs = new Map()) {
+    const covering = mutant.coveredBy ?? [];
+    const each = mutant.static || covering.length === 0
+        ? 1
+        : covering.reduce((sum, id) => sum + (costs.get(id) ?? 1), 0) / covering.length;
+    return 1 + (mutant.testsCompleted ?? covering.length) * each;
+}
+
+// Seconds per file and per mutated line for the next plans, each shard's measured time shared out by the
+// weight of its own mutants. Lines are [line, mutants, seconds], by the line each mutant starts on.
+export function measureSweep(report, shards) {
+    const costs = testCosts(report);
     const files = {};
+    const lines = {};
     for (const { scope, seconds } of shards) {
-        const weights = new Map([...scope.keys()].map((file) => [file, 0]));
+        const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+        const weighed = [];
         for (const [file, result] of Object.entries(report.files)) {
             for (const mutant of result.mutants ?? []) {
                 if (inScope(scope, file, mutant)) {
-                    weights.set(normalise(file), weights.get(normalise(file)) + mutantWeight(mutant));
+                    weighed.push({ file: normalise(file), mutant, weight: mutantWeight(mutant, costs) });
                 }
             }
         }
-        const total = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
-        const time = seconds > 0 ? seconds : 0;
-        for (const [file, weight] of weights) {
-            files[file] = (files[file] ?? 0) + (total > 0 ? (weight / total) * time : time / weights.size);
+        const total = weighed.reduce((sum, { weight }) => sum + weight, 0);
+        for (const file of scope.keys()) {
+            files[file] = (files[file] ?? 0) + (total > 0 ? 0 : time / scope.size);
+        }
+        for (const { file, mutant, weight } of total > 0 ? weighed : []) {
+            const share = (weight / total) * time;
+            const line = mutant.location.start.line;
+            files[file] += share;
+            lines[file] ??= new Map();
+            const [count, sum] = lines[file].get(line) ?? [0, 0];
+            lines[file].set(line, [count + 1, sum + share]);
         }
     }
-    return files;
+    const listed = Object.fromEntries(Object.entries(lines).map(([file, byLine]) => [file, [...byLine]
+        .sort(([a], [b]) => a - b)
+        .map(([line, [count, sum]]) => [line, count, Math.round(sum * 1000) / 1000])]));
+    return { files, lines: listed };
+}
+
+const isSeconds = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+// Estimated seconds for each scope entry ({ path, range, start, end }) from the last full sweep, or null when
+// there is no usable sweep. A measured file costs what it took; a range costs the larger of what its lines took
+// and the file's average per line, so code added since the sweep still counts; a file the sweep never saw costs
+// the sweep's average per line. `lineCount` gives a file's lines, or null when it is gone.
+export function estimateScope(entries, history, lineCount) {
+    const files = isObject(history?.files) ? history.files : {};
+    let seconds = 0;
+    let total = 0;
+    for (const [file, time] of Object.entries(files)) {
+        const count = isSeconds(time) ? lineCount(file) : null;
+        if (count > 0) {
+            seconds += time;
+            total += count;
+        }
+    }
+    if (total === 0) {
+        return null;
+    }
+    const recorded = (file, start, end) => {
+        const lines = isObject(history.lines) && Array.isArray(history.lines[file]) ? history.lines[file] : [];
+        return lines.reduce((sum, line) => (Array.isArray(line) && line[0] >= start && line[0] <= end
+            && isSeconds(line[2]) ? sum + line[2] : sum), 0);
+    };
+    const costs = entries.map(({ path: file, range, start, end }) => {
+        const count = lineCount(file) || 1;
+        const size = range ? end - start + 1 : count;
+        if (!isSeconds(files[file])) {
+            return size * (seconds / total);
+        }
+        if (!range) {
+            return files[file];
+        }
+        return Math.max(recorded(file, start, end), size * (files[file] / count));
+    });
+    return costs.every(Number.isFinite) && Number.isFinite(costs.reduce((sum, cost) => sum + cost, 0)) ? costs : null;
+}
+
+const disjoint = (entries) => entries.every(({ range }) => range) && [...entries]
+    .sort((a, b) => a.start - b.start)
+    .every((entry, index, sorted) => index === 0 || entry.start > sorted[index - 1].end);
+
+// Packs units ({ key, weight }), heaviest first, onto the least loaded of `count` shards.
+export function pack(units, count) {
+    const sorted = [...units].sort((a, b) => b.weight - a.weight || compare(a.key, b.key));
+    const bins = Array.from({ length: Math.min(count, sorted.length) }, () => ({ weight: 0, units: [] }));
+    for (const unit of sorted) {
+        const bin = bins.reduce((least, other) => (other.weight < least.weight
+            || (other.weight === least.weight && other.units.length < least.units.length) ? other : least));
+        bin.weight += unit.weight;
+        bin.units.push(unit);
+    }
+    return bins;
+}
+
+// Splits scope entries ({ path, text, range, start, end }) into at most `count` shards by their weights. A file
+// heavier than a shard's fair share is split by its ranges when no two overlap, so no mutant runs on two shards;
+// a range is never cut.
+export function planScope(entries, weights, count) {
+    const byPath = new Map();
+    entries.forEach((entry, index) => {
+        byPath.set(entry.path, [...(byPath.get(entry.path) ?? []), { entry, weight: weights[index] }]);
+    });
+    const weigh = (items) => items.reduce((sum, { weight }) => sum + weight, 0);
+    const total = weigh([...byPath.values()].flat());
+    const units = [...byPath.keys()].sort(compare).flatMap((file) => {
+        const items = byPath.get(file);
+        return weigh(items) > total / count && items.length > 1 && disjoint(items.map(({ entry }) => entry))
+            ? items.map(({ entry, weight }) => ({ key: entry.text, weight, entries: [entry] }))
+            : [{ key: file, weight: weigh(items), entries: items.map(({ entry }) => entry) }];
+    });
+    return pack(units, count).map((bin) => ({
+        weight: bin.weight,
+        entries: bin.units.flatMap((unit) => unit.entries)
+            .sort((a, b) => compare(a.path, b.path) || a.start - b.start),
+    }));
 }
 
 // Stryker's `mutate` patterns as the files on disk they select, in order, as Stryker reads them: a later `!`
@@ -345,21 +462,8 @@ export function expandMutate(patterns, cwd = process.cwd()) {
 }
 
 // Packs whole files, heaviest first, onto the least loaded of `count` shards.
-export function packFiles(weights, count) {
-    const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-    const units = [...weights].sort(([a, wa], [b, wb]) => wb - wa || compare(a, b));
-    const bins = Array.from({ length: Math.min(count, units.length) }, () => ({ weight: 0, files: [] }));
-    for (const [file, weight] of units) {
-        const bin = bins.reduce((least, other) => (other.weight < least.weight
-            || (other.weight === least.weight && other.files.length < least.files.length) ? other : least));
-        bin.weight += weight;
-        bin.files.push(file);
-    }
-    for (const bin of bins) {
-        bin.files.sort(compare);
-    }
-    return bins;
-}
+export const packFiles = (weights, count) => pack([...weights].map(([key, weight]) => ({ key, weight })), count)
+    .map((bin) => ({ weight: bin.weight, files: bin.units.map(({ key }) => key).sort(compare) }));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
     const [command, ...args] = process.argv.slice(2);

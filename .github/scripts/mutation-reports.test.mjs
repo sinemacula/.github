@@ -7,15 +7,19 @@ import {
     breaks,
     collectShards,
     escape,
+    estimateScope,
     expandMutate,
     inScope,
-    measureFiles,
+    measureSweep,
     mergeReports,
+    mutantWeight,
     packFiles,
     parseScope,
+    planScope,
     readFresh,
     reportProblems,
     scoreReport,
+    testCosts,
 } from './mutation-reports.mjs';
 
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-reports-'));
@@ -220,14 +224,35 @@ describe('packFiles', () => {
     });
 });
 
-describe('measureFiles', () => {
+describe('testCosts and mutantWeight', () => {
+    it('weighs a mutant by how much of the code its tests cover', () => {
+        const merged = report({
+            'a.ts': [mutant(1, 'Killed', { coveredBy: ['wide'], testsCompleted: 1 })],
+            'b.ts': [1, 2, 3, 4].map((line) => mutant(line, 'Killed', { coveredBy: ['wide', 'narrow'] })),
+        });
+        const costs = testCosts(merged);
+        assert.deepEqual([costs.get('wide'), costs.get('narrow')], [5 / 4.5, 4 / 4.5]);
+        assert.equal(mutantWeight(merged.files['a.ts'].mutants[0], costs), 1 + 5 / 4.5);
+        assert.equal(mutantWeight(merged.files['b.ts'].mutants[0], costs), 3);
+    });
+
+    it('counts each test of a static mutant as the average, and falls back to the test count', () => {
+        const costs = new Map([['wide', 4]]);
+        assert.equal(mutantWeight(mutant(1, 'Killed', { static: true, coveredBy: ['wide'], testsCompleted: 9 }),
+            costs), 10);
+        assert.equal(mutantWeight(mutant(1, 'Survived', { testsCompleted: 3 })), 4);
+        assert.equal(mutantWeight(mutant(1, 'NoCoverage')), 1);
+    });
+});
+
+describe('measureSweep', () => {
     it("shares each shard's seconds out by the weight of its files' mutants", () => {
         const merged = report({
             'a.ts': [mutant(1, 'Killed', { testsCompleted: 2 })],
             'b.ts': [mutant(1, 'Killed', { testsCompleted: 0 })],
             'c.ts': [mutant(1, 'Killed')],
         });
-        const files = measureFiles(merged, [
+        const { files } = measureSweep(merged, [
             { scope: parseScope('a.ts,b.ts'), seconds: 400 },
             { scope: parseScope('c.ts,types.ts'), seconds: 60 },
             { scope: parseScope('d.ts'), seconds: 0 },
@@ -240,10 +265,102 @@ describe('measureFiles', () => {
             'a.ts': [mutant(1, 'Killed', { testsCompleted: 0 }), mutant(20, 'Killed', { testsCompleted: 98 })],
             'b.ts': [mutant(1, 'Killed', { testsCompleted: 0 })],
         });
-        const files = measureFiles(merged, [
+        const { files, lines } = measureSweep(merged, [
             { scope: parseScope('a.ts:1-1,b.ts'), seconds: 20 },
             { scope: parseScope('a.ts:2-30'), seconds: 30 },
         ]);
         assert.deepEqual(files, { 'a.ts': 40, 'b.ts': 10 });
+        assert.deepEqual(lines, { 'a.ts': [[1, 1, 10], [20, 1, 30]], 'b.ts': [[1, 1, 10]] });
+    });
+
+    it('gives a file covered by a wide test more of the shard than one covered by many narrow tests', () => {
+        const narrow = Array.from({ length: 8 }, (_, index) => `n${index}`);
+        const merged = report({
+            'app.ts': [1, 2].map((line) => mutant(line, 'Killed', { coveredBy: ['app'], testsCompleted: 1 })),
+            'unit.ts': [1, 2].map((line) => mutant(line, 'Killed', { coveredBy: narrow, testsCompleted: 8 })),
+            'rest.ts': Array.from({ length: 40 }, (_, index) => mutant(index + 1, 'Killed', { coveredBy: ['app'] })),
+        });
+        const { files } = measureSweep(merged, [{ scope: parseScope('app.ts,unit.ts'), seconds: 100 }]);
+        assert.ok(files['app.ts'] > 2 * files['unit.ts']);
+    });
+
+    it('records nothing for a shard whose time is not a finite number', () => {
+        const merged = report({ 'a.ts': [mutant(1, 'Killed')] });
+        for (const seconds of [Infinity, Number.NaN, -5]) {
+            assert.deepEqual(measureSweep(merged, [{ scope: parseScope('a.ts'), seconds }]).files, { 'a.ts': 0 });
+        }
+    });
+});
+
+describe('estimateScope', () => {
+    const counts = { 'a.ts': 100, 'b.ts': 100, 'new.ts': 50 };
+    const lineCount = (file) => counts[file] ?? null;
+    const entry = (file, start, end) => (start
+        ? { path: file, range: true, start, end, text: `${file}:${start}-${end}` }
+        : { path: file, range: false, start: 0, end: 0, text: file });
+    const history = {
+        version: 2,
+        files: { 'a.ts': 600, 'b.ts': 20, 'gone.ts': 999 },
+        lines: { 'a.ts': [[10, 3, 500], [80, 1, 100]], 'b.ts': [[10, 2, 20]] },
+    };
+
+    it('costs a measured file at what it took, and a range at what its lines took', () => {
+        assert.deepEqual(estimateScope([entry('a.ts'), entry('b.ts'), entry('a.ts', 5, 15)], history, lineCount),
+            [600, 20, 500]);
+    });
+
+    it("costs new lines at the file's average, and a file the sweep never saw at the sweep's", () => {
+        const [added, unseen] = estimateScope([entry('a.ts', 40, 59), entry('new.ts')], history, lineCount);
+        assert.equal(added, 20 * 6);
+        assert.equal(unseen, 50 * (620 / 200));
+    });
+
+    it('reads a history without lines by the file average', () => {
+        const [range] = estimateScope([entry('a.ts', 5, 15)], { version: 1, files: history.files }, lineCount);
+        assert.equal(range, 11 * 6);
+    });
+
+    it('returns null without a usable history, and skips malformed lines', () => {
+        for (const missing of [null, {}, { files: [] }, { files: { 'gone.ts': 5 } }, { files: { 'a.ts': 'x' } }]) {
+            assert.equal(estimateScope([entry('a.ts')], missing, lineCount), null);
+        }
+        assert.equal(estimateScope([entry('new.ts')], { files: { 'a.ts': 1e308, 'b.ts': 1e308 } }, lineCount), null);
+        assert.equal(estimateScope([entry('a.ts'), entry('b.ts')], { files: { 'a.ts': 1e308, 'b.ts': 1e308 } },
+            lineCount), null);
+        const odd = { files: { 'a.ts': 600 }, lines: { 'a.ts': [null, [10, 1, 'x'], [12, 1, 30]] } };
+        assert.deepEqual(estimateScope([entry('a.ts', 1, 20)], odd, lineCount), [120]);
+    });
+});
+
+describe('planScope', () => {
+    const entry = (file, lines, range) => (range
+        ? { path: file, range: true, start: range[0], end: range[1], text: `${file}:${range[0]}-${range[1]}` }
+        : { path: file, range: false, start: 0, end: 0, text: file, lines });
+    const paths = (bins) => bins.map((bin) => bin.entries.map(({ text }) => text));
+
+    it('balances files of like size but unlike cost by cost', () => {
+        const entries = [entry('a.ts'), entry('b.ts'), entry('c.ts'), entry('d.ts')];
+        assert.deepEqual(paths(planScope(entries, [100, 100, 90, 90], 2)), [['a.ts', 'c.ts'], ['b.ts', 'd.ts']]);
+        const bins = planScope(entries, [6000, 300, 5800, 290], 2);
+        assert.deepEqual(paths(bins), [['a.ts', 'd.ts'], ['b.ts', 'c.ts']]);
+        assert.deepEqual(bins.map(({ weight }) => weight), [6290, 6100]);
+    });
+
+    it('splits a file heavier than its share across shards by range, and never cuts a range', () => {
+        const entries = [entry('big.ts', 0, [1, 10]), entry('big.ts', 0, [50, 60]), entry('small.ts')];
+        assert.deepEqual(paths(planScope(entries, [100, 90, 10], 2)), [['big.ts:1-10'], ['big.ts:50-60', 'small.ts']]);
+        assert.deepEqual(paths(planScope(entries, [1, 1, 100], 2)), [['small.ts'], ['big.ts:1-10', 'big.ts:50-60']]);
+    });
+
+    it('keeps overlapping ranges of a file on one shard, so no mutant runs twice', () => {
+        const entries = [entry('a.ts', 0, [1, 10]), entry('a.ts', 0, [5, 15])];
+        assert.deepEqual(paths(planScope(entries, [10, 11], 2)), [['a.ts:1-10', 'a.ts:5-15']]);
+        const touching = [entry('a.ts', 0, [1, 10]), entry('a.ts', 0, [10, 15])];
+        assert.deepEqual(paths(planScope(touching, [10, 11], 2)), [['a.ts:1-10', 'a.ts:10-15']]);
+    });
+
+    it('keeps zero-cost units spread and never plans more shards than units', () => {
+        const entries = [entry('a.ts'), entry('b.ts'), entry('c.ts')];
+        assert.deepEqual(paths(planScope(entries, [0, 0, 0], 6)), [['a.ts'], ['b.ts'], ['c.ts']]);
     });
 });
