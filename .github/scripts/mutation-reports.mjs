@@ -321,7 +321,7 @@ export function measureSweep(report, shards) {
     const files = {};
     const lines = {};
     for (const { scope, seconds } of shards) {
-        const time = seconds > 0 ? seconds : 0;
+        const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
         const weighed = [];
         for (const [file, result] of Object.entries(report.files)) {
             for (const mutant of result.mutants ?? []) {
@@ -385,8 +385,12 @@ export function estimateScope(entries, history, lineCount) {
         }
         return Math.max(recorded(file, start, end), size * (files[file] / count));
     });
-    return costs.every(Number.isFinite) ? costs : null;
+    return costs.every(Number.isFinite) && Number.isFinite(costs.reduce((sum, cost) => sum + cost, 0)) ? costs : null;
 }
+
+const disjoint = (entries) => entries.every(({ range }) => range) && [...entries]
+    .sort((a, b) => a.start - b.start)
+    .every((entry, index, sorted) => index === 0 || entry.start > sorted[index - 1].end);
 
 // Packs units ({ key, weight }), heaviest first, onto the least loaded of `count` shards.
 export function pack(units, count) {
@@ -401,8 +405,9 @@ export function pack(units, count) {
     return bins;
 }
 
-// Splits scope entries ({ path, text, range, start }) into at most `count` shards by their weights. A file
-// heavier than a shard's fair share is split by its ranges; a range is never cut.
+// Splits scope entries ({ path, text, range, start, end }) into at most `count` shards by their weights. A file
+// heavier than a shard's fair share is split by its ranges when no two overlap, so no mutant runs on two shards;
+// a range is never cut.
 export function planScope(entries, weights, count) {
     const byPath = new Map();
     entries.forEach((entry, index) => {
@@ -412,7 +417,7 @@ export function planScope(entries, weights, count) {
     const total = weigh([...byPath.values()].flat());
     const units = [...byPath.keys()].sort(compare).flatMap((file) => {
         const items = byPath.get(file);
-        return weigh(items) > total / count && items.length > 1 && items.every(({ entry }) => entry.range)
+        return weigh(items) > total / count && items.length > 1 && disjoint(items.map(({ entry }) => entry))
             ? items.map(({ entry, weight }) => ({ key: entry.text, weight, entries: [entry] }))
             : [{ key: file, weight: weigh(items), entries: items.map(({ entry }) => entry) }];
     });

@@ -283,6 +283,13 @@ describe('measureSweep', () => {
         const { files } = measureSweep(merged, [{ scope: parseScope('app.ts,unit.ts'), seconds: 100 }]);
         assert.ok(files['app.ts'] > 2 * files['unit.ts']);
     });
+
+    it('records nothing for a shard whose time is not a finite number', () => {
+        const merged = report({ 'a.ts': [mutant(1, 'Killed')] });
+        for (const seconds of [Infinity, Number.NaN, -5]) {
+            assert.deepEqual(measureSweep(merged, [{ scope: parseScope('a.ts'), seconds }]).files, { 'a.ts': 0 });
+        }
+    });
 });
 
 describe('estimateScope', () => {
@@ -318,6 +325,8 @@ describe('estimateScope', () => {
             assert.equal(estimateScope([entry('a.ts')], missing, lineCount), null);
         }
         assert.equal(estimateScope([entry('new.ts')], { files: { 'a.ts': 1e308, 'b.ts': 1e308 } }, lineCount), null);
+        assert.equal(estimateScope([entry('a.ts'), entry('b.ts')], { files: { 'a.ts': 1e308, 'b.ts': 1e308 } },
+            lineCount), null);
         const odd = { files: { 'a.ts': 600 }, lines: { 'a.ts': [null, [10, 1, 'x'], [12, 1, 30]] } };
         assert.deepEqual(estimateScope([entry('a.ts', 1, 20)], odd, lineCount), [120]);
     });
@@ -341,6 +350,13 @@ describe('planScope', () => {
         const entries = [entry('big.ts', 0, [1, 10]), entry('big.ts', 0, [50, 60]), entry('small.ts')];
         assert.deepEqual(paths(planScope(entries, [100, 90, 10], 2)), [['big.ts:1-10'], ['big.ts:50-60', 'small.ts']]);
         assert.deepEqual(paths(planScope(entries, [1, 1, 100], 2)), [['small.ts'], ['big.ts:1-10', 'big.ts:50-60']]);
+    });
+
+    it('keeps overlapping ranges of a file on one shard, so no mutant runs twice', () => {
+        const entries = [entry('a.ts', 0, [1, 10]), entry('a.ts', 0, [5, 15])];
+        assert.deepEqual(paths(planScope(entries, [10, 11], 2)), [['a.ts:1-10', 'a.ts:5-15']]);
+        const touching = [entry('a.ts', 0, [1, 10]), entry('a.ts', 0, [10, 15])];
+        assert.deepEqual(paths(planScope(touching, [10, 11], 2)), [['a.ts:1-10', 'a.ts:10-15']]);
     });
 
     it('keeps zero-cost units spread and never plans more shards than units', () => {
