@@ -34,6 +34,11 @@
 # merged score. With one shard the sweep runs as one job, as it always has.
 # Report freshness, merging and scoring live in `.github/scripts`, which the
 # jobs check out at this workflow's own commit.
+#
+# With `mutation-pr-mode: advisory`, a pull request's scoped mutation no longer
+# fails on a score under the break threshold, Stryker's or a shard's own; it
+# still fails when Stryker cannot run or leaves no fresh report. Pushes and the
+# sweep always block. A newer push to a pull request cancels its older run.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -77,12 +82,33 @@ on:
                 type: number
                 required: false
                 default: 1
+            mutation-pr-mode:
+                description: >-
+                    'blocking' (default) or 'advisory'. Advisory lets a pull request's scoped mutation pass under
+                    the break threshold; a run Stryker could not finish still fails.
+                type: string
+                required: false
+                default: blocking
 
 # ==============================================================================
 # PERMISSIONS
 # ==============================================================================
 permissions:
     contents: read
+
+# ==============================================================================
+# CONCURRENCY
+# ==============================================================================
+# Pull request runs share a group per pull request, so a newer push cancels
+# the older run. Every other run has a group of its own and is never
+# cancelled. The prefix keeps it apart from any group the caller sets; a
+# caller that calls this workflow twice in one run would cancel itself.
+# ==============================================================================
+concurrency:
+    group: >-
+        node-quality-gates-${{ github.workflow }}-${{ github.event_name == 'pull_request'
+        && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ==============================================================================
 # ENVIRONMENT
@@ -217,9 +243,14 @@ jobs:
                 env:
                     BASE_REF: ${{ github.base_ref || 'master' }}
                     SHARDS: ${{ inputs.mutation-shards }}
+                    MODE: ${{ inputs.mutation-pr-mode }}
                     SCOPE_FILE: ${{ runner.temp }}/scope.txt
                     HISTORY: ${{ runner.temp }}/mutation-full-history.json
                 run: |
+                    if [ "$MODE" != blocking ] && [ "$MODE" != advisory ]; then
+                        echo "::error::mutation-pr-mode must be 'blocking' or 'advisory', got '$MODE'."
+                        exit 1
+                    fi
                     npm run -s mutation:scope -- --base "origin/${BASE_REF}" > "$SCOPE_FILE"
                     node --input-type=module - <<'JS'
                     // Splits the scope into shards balanced by expected time and fingerprints what the tests read.
@@ -384,7 +415,9 @@ jobs:
     # cached result cannot vouch for, and saves its own report whether it
     # passed or failed. Stryker's break threshold still applies, and the
     # shard's own scope must meet it too: Stryker's figure also counts the
-    # cached kills it carries from outside the scope.
+    # cached kills it carries from outside the scope. In advisory mode on a
+    # pull request either miss is a warning, once Stryker has finished and
+    # left a fresh report.
     # ==========================================================================
     mutation-shard:
         name: Mutation shard ${{ matrix.shard }}
@@ -398,6 +431,7 @@ jobs:
             matrix: ${{ fromJSON(needs.mutation-plan.outputs.matrix) }}
 
         env:
+            ADVISORY: ${{ inputs.mutation-pr-mode == 'advisory' && github.event_name == 'pull_request' }}
             MUTATE: ${{ matrix.mutate }}
             REPORT: reports/stryker-incremental.json
             TESTS: reports/stryker-incremental.tests.json
@@ -565,6 +599,13 @@ jobs:
                         echo '{}' > "$EMPTY"
                         exit 0
                     fi
+                    if [ "$ADVISORY" = true ] && [ "$status" -eq 1 ] && grep -Eq \
+                        'Final mutation score [0-9.]+ under breaking threshold [0-9.]+, setting exit code to 1' \
+                        <<< "$plain"; then
+                        echo "::warning::Shard $SHARD is under the break threshold; advisory on pull requests."
+                        echo "deferred=true" >> "$GITHUB_OUTPUT"
+                        exit 0
+                    fi
                     exit "$status"
 
             -   name: Check the report is fresh
@@ -625,8 +666,13 @@ jobs:
                 if: ${{ !cancelled() && steps.stryker.outcome != 'skipped' && steps.fresh.outcome == 'success' }}
                 env:
                     FRESH: ${{ steps.fresh.outputs.fresh }}
+                    DEFERRED: ${{ steps.stryker.outputs.deferred }}
                 run: |
                     if [ "$FRESH" != true ]; then
+                        if [ "$DEFERRED" = true ]; then
+                            echo "::error::Stryker left no fresh report, so its score cannot be trusted."
+                            exit 1
+                        fi
                         echo "::notice::No incremental report, so the gate's own verdict stands."
                         exit 0
                     fi
@@ -661,11 +707,15 @@ jobs:
                             + ` by timeout, ${undetected} undetected).`;
                     lines.forEach((line) => console.log(line));
                     console.log(verdict);
-                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shard\n\n${verdict}\n`
-                        + (lines.length ? `\n~~~text\n${lines.join('\n')}\n~~~\n` : ''));
+                    const shown = lines.slice(0, 20);
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Mutation shard\n\n${verdict}`
+                        + ` Break threshold: ${threshold ?? 'none'}.\n`
+                        + (shown.length ? `\n~~~text\n${shown.join('\n')}\n~~~\n` : '')
+                        + (lines.length > shown.length ? `\n${lines.length - shown.length} more not shown.\n` : ''));
                     if (counted > 0 && breaks(score, threshold)) {
-                        console.log(`::error::Score ${score.toFixed(2)} is under break threshold ${threshold}.`);
-                        process.exit(1);
+                        const level = process.env.ADVISORY === 'true' ? 'warning' : 'error';
+                        console.log(`::${level}::Score ${score.toFixed(2)} is under break threshold ${threshold}.`);
+                        process.exit(level === 'error' ? 1 : 0);
                     }
                     JS
 
