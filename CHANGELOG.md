@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/sinemacula/.github/compare/v1.11.0...v1.12.0) (2026-10-14)
+
+
+### Features
+
+* **mutation:** advisory pull request mode and cancelled superseded runs ([#73](https://github.com/sinemacula/.github/issues/73)) ([39083c1](https://github.com/sinemacula/.github/commit/39083c1aaf7e3892ac77c7c780531b4e65c340e4))
+
 ## [1.11.0](https://github.com/sinemacula/.github/compare/v1.10.0...v1.11.0) (2026-10-11)
 
 
