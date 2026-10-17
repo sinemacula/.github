@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/sinemacula/.github/compare/v1.12.0...v1.13.0) (2026-10-17)
+
+
+### Features
+
+* add a reusable Terraform tests workflow ([#76](https://github.com/sinemacula/.github/issues/76)) ([60dc8e7](https://github.com/sinemacula/.github/commit/60dc8e752de12fc6116cf26ea9f98f7dce0c0232))
+
 ## [1.12.0](https://github.com/sinemacula/.github/compare/v1.11.0...v1.12.0) (2026-10-14)
 
 
