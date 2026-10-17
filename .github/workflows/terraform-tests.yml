@@ -1,0 +1,95 @@
+# ==============================================================================
+# REUSABLE WORKFLOW: Terraform Tests
+# ==============================================================================
+# Validates a Sine Macula Terraform root module at the Terraform version the
+# repository pins: initialised without a backend, then `terraform validate`.
+#
+# Formatting and TFLint run in Qlty, whose sandbox cannot initialise a module,
+# so validation runs here. The lock file is read-only: commit
+# `.terraform.lock.hcl` covering every provider, or initialisation fails. The
+# caller must grant `contents: read`.
+# ==============================================================================
+name: Terraform Tests
+
+# ==============================================================================
+# TRIGGER
+# ==============================================================================
+on:
+    workflow_call:
+        inputs:
+            working-directory:
+                description: Root module directory, relative to the repository root
+                type: string
+                required: false
+                default: .
+            terraform-version-file:
+                description: File holding the exact Terraform version, relative to the repository root
+                type: string
+                required: false
+                default: .terraform-version
+
+# ==============================================================================
+# PERMISSIONS
+# ==============================================================================
+permissions:
+    contents: read
+
+# ==============================================================================
+# ENVIRONMENT
+# ==============================================================================
+env:
+    TF_IN_AUTOMATION: 'true'
+    TF_INPUT: 'false'
+
+# ==============================================================================
+# DEFAULTS
+# ==============================================================================
+defaults:
+    run:
+        shell: bash
+
+jobs:
+
+    # ==========================================================================
+    # JOB: VALIDATE
+    # ==========================================================================
+    validate:
+        name: Test / Terraform validate
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            -   name: Checkout
+                uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            # The version is written to GITHUB_OUTPUT, so anything but a bare
+            # version number is refused rather than passed on.
+            -   name: Read the Terraform version
+                id: version
+                env:
+                    VERSION_FILE: ${{ inputs.terraform-version-file }}
+                run: |
+                    contents="$(< "${VERSION_FILE}")"
+
+                    if [[ ! ${contents} =~ ^[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+)[[:space:]]*$ ]]; then
+                        echo "Expected an exact Terraform version such as 1.16.5 in ${VERSION_FILE}." >&2
+                        exit 1
+                    fi
+
+                    echo "terraform=${BASH_REMATCH[1]}" >> "${GITHUB_OUTPUT}"
+
+            -   name: Setup Terraform
+                uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+                with:
+                    terraform_version: ${{ steps.version.outputs.terraform }}
+                    terraform_wrapper: false
+
+            -   name: Initialise without a backend
+                working-directory: ${{ inputs.working-directory }}
+                run: terraform init -backend=false -lockfile=readonly
+
+            -   name: Validate
+                working-directory: ${{ inputs.working-directory }}
+                run: terraform validate
