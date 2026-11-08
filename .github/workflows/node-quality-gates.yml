@@ -39,6 +39,10 @@
 # fails on a score under the break threshold, Stryker's or a shard's own; it
 # still fails when Stryker cannot run or leaves no fresh report. Pushes and the
 # sweep always block. A newer push to a pull request cancels its older run.
+#
+# A consumer that installs a scoped package from a private registry passes
+# `registry-url`, `registry-scope` and the `registry-token` secret; every
+# install then authenticates to that registry for that scope alone.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -89,6 +93,24 @@ on:
                 type: string
                 required: false
                 default: blocking
+            registry-url:
+                description: >-
+                    Registry URL a scoped package installs from, such as https://npm.pkg.github.com. Empty installs
+                    from the public registry only.
+                type: string
+                required: false
+                default: ''
+            registry-scope:
+                description: The package scope `registry-url` serves, such as @example. Used only with `registry-url`.
+                type: string
+                required: false
+                default: ''
+        secrets:
+            registry-token:
+                description: >-
+                    Token the install authenticates to `registry-url` with. A token from the caller keeps the
+                    caller's permissions, so a GitHub Packages caller passes a GITHUB_TOKEN that may read packages.
+                required: false
 
 # ==============================================================================
 # PERMISSIONS
@@ -147,8 +169,12 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Knip
@@ -173,8 +199,12 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Build
@@ -209,8 +239,12 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Checkout the report scripts
@@ -450,8 +484,12 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Checkout the report scripts
@@ -755,6 +793,8 @@ jobs:
                 uses: actions/setup-node@v7
                 with:
                     node-version: ${{ inputs.node-version }}
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Checkout the report scripts
                 if: ${{ always() }}
@@ -932,6 +972,8 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Restore the sweep timings
                 if: ${{ steps.count.outputs.sharded == 'true' }}
@@ -946,6 +988,7 @@ jobs:
                 id: plan
                 if: ${{ steps.count.outputs.sharded == 'true' }}
                 env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                     SHARDS: ${{ inputs.mutation-full-shards }}
                     HISTORY: ${{ runner.temp }}/mutation-full-history.json
                 run: |
@@ -1085,8 +1128,12 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Checkout the report scripts
@@ -1272,10 +1319,14 @@ jobs:
                 with:
                     node-version: ${{ inputs.node-version }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             # Stryker's own install supplies the scoring and report packages.
             -   name: Install dependencies
                 if: ${{ env.SHARDED == 'true' }}
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci --ignore-scripts
 
             -   name: Download shard reports
