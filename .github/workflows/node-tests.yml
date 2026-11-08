@@ -12,6 +12,10 @@
 # here. The build and e2e jobs toggle off for backends, libraries and tooling
 # that do not have them. The caller must grant `contents: read` and
 # `id-token: write` for the coverage upload.
+#
+# A consumer that installs a scoped package from a private registry passes
+# `registry-url`, `registry-scope` and the `registry-token` secret; every
+# install then authenticates to that registry for that scope alone.
 # ==============================================================================
 name: Node Tests
 
@@ -41,6 +45,24 @@ on:
                 type: boolean
                 required: false
                 default: true
+            registry-url:
+                description: >-
+                    Registry URL a scoped package installs from, such as https://npm.pkg.github.com. Empty installs
+                    from the public registry only.
+                type: string
+                required: false
+                default: ''
+            registry-scope:
+                description: The package scope `registry-url` serves, such as @example. Used only with `registry-url`.
+                type: string
+                required: false
+                default: ''
+        secrets:
+            registry-token:
+                description: >-
+                    Token the install authenticates to `registry-url` with. A token from the caller keeps the
+                    caller's permissions, so a GitHub Packages caller passes a GITHUB_TOKEN that may read packages.
+                required: false
 
 # ==============================================================================
 # PERMISSIONS
@@ -90,8 +112,12 @@ jobs:
                 with:
                     node-version: ${{ matrix.node }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Type-check
@@ -132,8 +158,12 @@ jobs:
                 with:
                     node-version: ${{ fromJSON(inputs.node-versions)[0] }}
                     cache: npm
+                    registry-url: ${{ inputs.registry-url }}
+                    scope: ${{ inputs.registry-scope }}
 
             -   name: Install dependencies
+                env:
+                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
                 run: npm ci
 
             -   name: Install Playwright browsers
