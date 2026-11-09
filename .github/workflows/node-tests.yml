@@ -10,12 +10,14 @@
 # live in each repository's own config (vitest), so this workflow stays
 # threshold-agnostic and tightening them propagates through the config, not
 # here. The build and e2e jobs toggle off for backends, libraries and tooling
-# that do not have them. The caller must grant `contents: read` and
-# `id-token: write` for the coverage upload.
+# that do not have them. The caller must grant `contents: read`,
+# `id-token: write` for the coverage upload, and `packages: read`.
 #
 # A consumer that installs a scoped package from a private registry passes
 # `registry-url`, `registry-scope` and the `registry-token` secret; every
-# install then authenticates to that registry for that scope alone.
+# install then authenticates to that registry for that scope alone. The jobs
+# declare `packages: read` because a called workflow's permissions bound the
+# caller's GITHUB_TOKEN, so without it that token cannot read packages.
 # ==============================================================================
 name: Node Tests
 
@@ -60,8 +62,8 @@ on:
         secrets:
             registry-token:
                 description: >-
-                    Token the install authenticates to `registry-url` with. A token from the caller keeps the
-                    caller's permissions, so a GitHub Packages caller passes a GITHUB_TOKEN that may read packages.
+                    Token the install authenticates to `registry-url` with. A GitHub Packages caller passes its
+                    GITHUB_TOKEN, which reads packages because this workflow grants `packages: read`.
                 required: false
 
 # ==============================================================================
@@ -70,6 +72,7 @@ on:
 permissions:
     contents: read
     id-token: write
+    packages: read
 
 # ==============================================================================
 # ENVIRONMENT
