@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0](https://github.com/sinemacula/.github/compare/v1.13.0...v2.0.0) (2026-11-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* grant packages: read so a caller's token can read a private registry ([#85](https://github.com/sinemacula/.github/issues/85))
+
+### Features
+
+* grant packages: read so a caller's token can read a private registry ([#85](https://github.com/sinemacula/.github/issues/85)) ([b48379a](https://github.com/sinemacula/.github/commit/b48379a52ca58e559eadf47f6a0d20f97256de5e))
+* let the Node workflows authenticate a scoped npm registry ([#83](https://github.com/sinemacula/.github/issues/83)) ([421c4c1](https://github.com/sinemacula/.github/commit/421c4c1eb080cd5ca6ebfa07688b88f76e7a8183))
+
 ## [1.13.0](https://github.com/sinemacula/.github/compare/v1.12.0...v1.13.0) (2026-10-17)
 
 
