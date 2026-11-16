@@ -116,7 +116,9 @@ export function collectShards(dir, prefix, shards, recordName) {
     let names = [];
     try {
         names = fs.readdirSync(dir);
-    } catch {}
+    } catch {
+        // An unreadable or missing folder holds no artifacts, so every shard is missing.
+    }
     const locate = (base, name) =>
         [path.join(base, 'reports', name), path.join(base, name)].find(file => fs.existsSync(file)) ?? null;
     const entry = (shard, base) => ({
@@ -152,6 +154,9 @@ export function collectShards(dir, prefix, shards, recordName) {
     return { found: [...found.values()], missing };
 }
 
+// The first copy of a mutant stands until a copy its shard owns replaces one it does not.
+const prefer = (current, copy) => (!current || (!current.owned && copy.owned) ? copy : current);
+
 // Unions reports by mutant and test key. A shard's own scope wins over carried copies, and a carried copy its
 // owner no longer reports is dropped as a mutant the code no longer has.
 export function mergeReports(entries, scopes) {
@@ -186,11 +191,8 @@ export function mergeReports(entries, scopes) {
             }
             for (const mutant of result.mutants ?? []) {
                 const key = mutantKey(normalise(file), mutant);
-                const current = entry.mutants.get(key);
-                const owned = owns(shard, file, mutant);
-                if (!current || (!current.owned && owned)) {
-                    entry.mutants.set(key, { mutant, owned, ids: idMaps[index] });
-                }
+                const copy = { mutant, owned: owns(shard, file, mutant), ids: idMaps[index] };
+                entry.mutants.set(key, prefer(entry.mutants.get(key), copy));
             }
             chosen.set(normalise(file), entry);
         }
@@ -334,17 +336,15 @@ export function measureSweep(report, shards) {
     const lines = {};
     for (const { scope, seconds } of shards) {
         const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-        const weighed = [];
-        for (const [file, result] of Object.entries(report.files)) {
-            for (const mutant of result.mutants ?? []) {
-                if (inScope(scope, file, mutant)) {
-                    weighed.push({ file: normalise(file), mutant, weight: mutantWeight(mutant, costs) });
-                }
-            }
-        }
+        const weighed = Object.entries(report.files).flatMap(([file, result]) =>
+            (result.mutants ?? [])
+                .filter(mutant => inScope(scope, file, mutant))
+                .map(mutant => ({ file: normalise(file), mutant, weight: mutantWeight(mutant, costs) })),
+        );
         const total = weighed.reduce((sum, { weight }) => sum + weight, 0);
+        const unweighed = total > 0 ? 0 : time / scope.size;
         for (const file of scope.keys()) {
-            files[file] = (files[file] ?? 0) + (total > 0 ? 0 : time / scope.size);
+            files[file] = (files[file] ?? 0) + unweighed;
         }
         for (const { file, mutant, weight } of total > 0 ? weighed : []) {
             const share = (weight / total) * time;
@@ -456,30 +456,29 @@ export function planScope(entries, weights, count) {
 // pattern drops files, and a line range keeps its whole file, since the full sweep never splits one.
 export function expandMutate(patterns, cwd = process.cwd()) {
     const skip = entry => /(^|[\\/])(node_modules|\.git)$/.test(typeof entry === 'string' ? entry : entry.name);
+    const isFile = name => {
+        try {
+            return fs.statSync(path.join(cwd, name)).isFile();
+        } catch {
+            return false;
+        }
+    };
     const selected = new Set();
     for (const raw of patterns) {
         const text = String(raw).trim();
-        if (text === '') {
-            continue;
-        }
         const negated = text.startsWith('!');
         const body = negated ? text.slice(1) : text;
         const pattern = RANGE.exec(body)?.[1] ?? body;
         if (negated) {
-            for (const file of selected) {
-                if (path.matchesGlob(file, normalise(pattern, cwd))) {
-                    selected.delete(file);
-                }
+            const glob = normalise(pattern, cwd);
+            for (const file of [...selected].filter(name => path.matchesGlob(name, glob))) {
+                selected.delete(file);
             }
-            continue;
-        }
-        for (const file of fs.globSync(pattern, { cwd, exclude: skip })) {
-            const name = normalise(file, cwd);
-            try {
-                if (fs.statSync(path.join(cwd, name)).isFile()) {
-                    selected.add(name);
-                }
-            } catch {}
+        } else if (text !== '') {
+            const files = fs.globSync(pattern, { cwd, exclude: skip }).map(file => normalise(file, cwd));
+            for (const file of files.filter(isFile)) {
+                selected.add(file);
+            }
         }
     }
     return [...selected].sort();
