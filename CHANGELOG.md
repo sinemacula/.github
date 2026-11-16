@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/sinemacula/.github/compare/v2.0.0...v3.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* let the Node workflows sign in to AWS CodeArtifact through OIDC ([#90](https://github.com/sinemacula/.github/issues/90))
+
+### Features
+
+* let the Node workflows sign in to AWS CodeArtifact through OIDC ([#90](https://github.com/sinemacula/.github/issues/90)) ([288baa3](https://github.com/sinemacula/.github/commit/288baa38d4774d9dce3df94db8478b074de56396))
+
 ## [2.0.0](https://github.com/sinemacula/.github/compare/v1.13.0...v2.0.0) (2026-11-09)
 
 
