@@ -33,16 +33,16 @@ const inRange = ({ start, end }, range) =>
     atOrAfter(range.end, { line: end.line, column: end.column - 1 });
 
 // The plans escape magic characters as one-character classes for Stryker.
-export const unescape = file => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
+export const unescapePath = file => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
 
-export const escape = file => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
+export const escapePath = file => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
 
 // A --mutate list as each file mapped to true (the whole file) or its line ranges.
 export function parseScope(mutate) {
     const scope = new Map();
     for (const entry of mutate.split(',').filter(Boolean)) {
         const range = RANGE.exec(entry);
-        const file = normalise(unescape(range ? range[1] : entry));
+        const file = normalise(unescapePath(range ? range[1] : entry));
         const current = scope.get(file);
         if (!range) {
             scope.set(file, true);

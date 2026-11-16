@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import {
     breaks,
     collectShards,
-    escape,
+    escapePath,
     estimateScope,
     expandMutate,
     inScope,
@@ -82,7 +82,7 @@ describe('readFresh', () => {
 
 describe('parseScope', () => {
     it('keeps whole files and ranges, and undoes the plan escaping', () => {
-        const scope = parseScope(`${escape('src/[id].ts')},src/b.ts:10-20,src/b.ts:30:2-31`);
+        const scope = parseScope(`${escapePath('src/[id].ts')},src/b.ts:10-20,src/b.ts:30:2-31`);
         assert.equal(scope.get('src/[id].ts'), true);
         assert.equal(scope.get('src/b.ts').length, 2);
         assert.ok(inScope(scope, 'src/b.ts', mutant(15)));
