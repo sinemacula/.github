@@ -21,8 +21,8 @@
 # caller's GITHUB_TOKEN, so without it that token cannot read packages.
 #
 # For an AWS CodeArtifact registry the consumer passes the `codeartifact-*`
-# inputs instead of the secret; each install job then assumes the role through
-# OIDC and gets a token for its install.
+# inputs instead of the secret; each install job then assumes
+# `codeartifact-role` through OIDC and gets a token for its install.
 # ==============================================================================
 name: Node Tests
 

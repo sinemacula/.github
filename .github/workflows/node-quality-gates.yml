@@ -43,14 +43,13 @@
 # A consumer that installs a scoped package from a private registry passes
 # `registry-url`, `registry-scope` and the `registry-token` secret; every
 # install then authenticates to that registry for that scope alone. The caller
-# must grant `contents: read` and `packages: read`: a called workflow's
-# permissions bound the caller's GITHUB_TOKEN, so without it that token cannot
-# read packages.
+# must grant `contents: read`, `id-token: write` for the CodeArtifact sign-in,
+# and `packages: read`: a called workflow's permissions bound the caller's
+# GITHUB_TOKEN, so without `packages: read` that token cannot read packages.
 #
 # For an AWS CodeArtifact registry the consumer passes the `codeartifact-*`
-# inputs instead of the secret; each install job then assumes the role through
-# OIDC and gets a token for its install. The caller must grant
-# `id-token: write` whether or not it uses them.
+# inputs instead of the secret; each install job then assumes
+# `codeartifact-role` through OIDC and gets a token for its install.
 # ==============================================================================
 name: Node Quality Gates
 
@@ -922,6 +921,8 @@ jobs:
         needs: [ mutation-plan, mutation-shard ]
         if: ${{ always() && needs.mutation-plan.outputs.empty == 'false' }}
         runs-on: ${{ inputs.heavy-runner }}
+        permissions:
+            contents: read
 
         steps:
             -   name: Setup Node.js
@@ -1031,6 +1032,7 @@ jobs:
         needs: [ mutation-plan, mutation-shard ]
         if: ${{ always() && inputs.run-mutation && github.event_name != 'schedule' }}
         runs-on: ubuntu-latest
+        permissions: {}
 
         steps:
             -   name: Check the shards
