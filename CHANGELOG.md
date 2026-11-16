@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/sinemacula/.github/compare/v3.0.0...v3.0.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* let quality gate jobs inherit the caller's permissions ([#92](https://github.com/sinemacula/.github/issues/92)) ([c8a469c](https://github.com/sinemacula/.github/commit/c8a469cdac479931815b9d8b8ced744bd56e12a5))
+
 ## [3.0.0](https://github.com/sinemacula/.github/compare/v2.0.0...v3.0.0) (2026-11-16)
 
 
