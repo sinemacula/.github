@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.2](https://github.com/sinemacula/.github/compare/v3.0.1...v3.0.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* let test jobs inherit the caller's permissions ([#94](https://github.com/sinemacula/.github/issues/94)) ([039856f](https://github.com/sinemacula/.github/commit/039856fcc683f3833feb2d189f615bfdd123155b))
+
 ## [3.0.1](https://github.com/sinemacula/.github/compare/v3.0.0...v3.0.1) (2026-11-16)
 
 
