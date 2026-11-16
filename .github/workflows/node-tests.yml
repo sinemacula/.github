@@ -10,15 +10,17 @@
 # live in each repository's own config (vitest), so this workflow stays
 # threshold-agnostic and tightening them propagates through the config, not
 # here. The build and e2e jobs toggle off for backends, libraries and tooling
-# that do not have them. The caller must grant `contents: read`,
-# `id-token: write` for the coverage upload and the CodeArtifact sign-in, and
-# `packages: read`.
+# that do not have them.
 #
 # A consumer that installs a scoped package from a private registry passes
 # `registry-url`, `registry-scope` and the `registry-token` secret; every
-# install then authenticates to that registry for that scope alone. The jobs
-# declare `packages: read` because a called workflow's permissions bound the
-# caller's GITHUB_TOKEN, so without it that token cannot read packages.
+# install then authenticates to that registry for that scope alone.
+#
+# The jobs inherit the caller's permissions: grant `contents: read`,
+# `id-token: write` for the coverage upload and any CodeArtifact sign-in, and
+# `packages: read` only when installing from GitHub Packages. A called workflow
+# cannot ask for more than its caller grants, so asking here would stop every
+# caller that grants less.
 #
 # For an AWS CodeArtifact registry the consumer passes the `codeartifact-*`
 # inputs instead of the secret; each install job then assumes
@@ -90,16 +92,8 @@ on:
             registry-token:
                 description: >-
                     Token the install authenticates to `registry-url` with. A GitHub Packages caller passes its
-                    GITHUB_TOKEN, which reads packages because this workflow grants `packages: read`.
+                    GITHUB_TOKEN, which reads packages when the caller grants `packages: read`.
                 required: false
-
-# ==============================================================================
-# PERMISSIONS
-# ==============================================================================
-permissions:
-    contents: read
-    id-token: write
-    packages: read
 
 # ==============================================================================
 # ENVIRONMENT
