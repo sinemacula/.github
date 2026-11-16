@@ -11,13 +11,18 @@
 # threshold-agnostic and tightening them propagates through the config, not
 # here. The build and e2e jobs toggle off for backends, libraries and tooling
 # that do not have them. The caller must grant `contents: read`,
-# `id-token: write` for the coverage upload, and `packages: read`.
+# `id-token: write` for the coverage upload and the CodeArtifact sign-in, and
+# `packages: read`.
 #
 # A consumer that installs a scoped package from a private registry passes
 # `registry-url`, `registry-scope` and the `registry-token` secret; every
 # install then authenticates to that registry for that scope alone. The jobs
 # declare `packages: read` because a called workflow's permissions bound the
 # caller's GITHUB_TOKEN, so without it that token cannot read packages.
+#
+# For an AWS CodeArtifact registry the consumer passes the `codeartifact-*`
+# inputs instead of the secret; each install job then assumes
+# `codeartifact-role` through OIDC and gets a token for its install.
 # ==============================================================================
 name: Node Tests
 
@@ -56,6 +61,28 @@ on:
                 default: ''
             registry-scope:
                 description: The package scope `registry-url` serves, such as @example. Used only with `registry-url`.
+                type: string
+                required: false
+                default: ''
+            codeartifact-role:
+                description: >-
+                    ARN of the IAM role each install assumes through OIDC to get a token for an AWS CodeArtifact
+                    `registry-url`, in place of `registry-token`. Empty skips the sign-in.
+                type: string
+                required: false
+                default: ''
+            codeartifact-region:
+                description: AWS Region of the CodeArtifact domain. Used only with `codeartifact-role`.
+                type: string
+                required: false
+                default: ''
+            codeartifact-domain:
+                description: CodeArtifact domain that holds `registry-url`. Used only with `codeartifact-role`.
+                type: string
+                required: false
+                default: ''
+            codeartifact-domain-owner:
+                description: AWS account ID that owns `codeartifact-domain`. Used only with `codeartifact-role`.
                 type: string
                 required: false
                 default: ''
@@ -118,9 +145,35 @@ jobs:
                     registry-url: ${{ inputs.registry-url }}
                     scope: ${{ inputs.registry-scope }}
 
+            -   name: Assume the CodeArtifact role
+                id: aws
+                if: ${{ inputs.codeartifact-role != '' }}
+                uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+                with:
+                    role-to-assume: ${{ inputs.codeartifact-role }}
+                    aws-region: ${{ inputs.codeartifact-region }}
+                    output-credentials: true
+                    output-env-credentials: false
+
+            -   name: Get a CodeArtifact token
+                id: codeartifact
+                if: ${{ inputs.codeartifact-role != '' }}
+                env:
+                    AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+                    AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+                    AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+                    AWS_REGION: ${{ inputs.codeartifact-region }}
+                    DOMAIN: ${{ inputs.codeartifact-domain }}
+                    DOMAIN_OWNER: ${{ inputs.codeartifact-domain-owner }}
+                run: |
+                    token=$(aws codeartifact get-authorization-token --domain "$DOMAIN" --domain-owner "$DOMAIN_OWNER" \
+                        --duration-seconds 0 --query authorizationToken --output text)
+                    echo "::add-mask::$token"
+                    echo "token=$token" >> "$GITHUB_OUTPUT"
+
             -   name: Install dependencies
                 env:
-                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
+                    NODE_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token || secrets.registry-token }}
                 run: npm ci
 
             -   name: Type-check
@@ -164,9 +217,35 @@ jobs:
                     registry-url: ${{ inputs.registry-url }}
                     scope: ${{ inputs.registry-scope }}
 
+            -   name: Assume the CodeArtifact role
+                id: aws
+                if: ${{ inputs.codeartifact-role != '' }}
+                uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+                with:
+                    role-to-assume: ${{ inputs.codeartifact-role }}
+                    aws-region: ${{ inputs.codeartifact-region }}
+                    output-credentials: true
+                    output-env-credentials: false
+
+            -   name: Get a CodeArtifact token
+                id: codeartifact
+                if: ${{ inputs.codeartifact-role != '' }}
+                env:
+                    AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+                    AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+                    AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
+                    AWS_REGION: ${{ inputs.codeartifact-region }}
+                    DOMAIN: ${{ inputs.codeartifact-domain }}
+                    DOMAIN_OWNER: ${{ inputs.codeartifact-domain-owner }}
+                run: |
+                    token=$(aws codeartifact get-authorization-token --domain "$DOMAIN" --domain-owner "$DOMAIN_OWNER" \
+                        --duration-seconds 0 --query authorizationToken --output text)
+                    echo "::add-mask::$token"
+                    echo "token=$token" >> "$GITHUB_OUTPUT"
+
             -   name: Install dependencies
                 env:
-                    NODE_AUTH_TOKEN: ${{ secrets.registry-token }}
+                    NODE_AUTH_TOKEN: ${{ steps.codeartifact.outputs.token || secrets.registry-token }}
                 run: npm ci
 
             -   name: Install Playwright browsers
