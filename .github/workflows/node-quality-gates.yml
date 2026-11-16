@@ -42,10 +42,11 @@
 #
 # A consumer that installs a scoped package from a private registry passes
 # `registry-url`, `registry-scope` and the `registry-token` secret; every
-# install then authenticates to that registry for that scope alone. The caller
-# must grant `contents: read`, `id-token: write` for the CodeArtifact sign-in,
-# and `packages: read`: a called workflow's permissions bound the caller's
-# GITHUB_TOKEN, so without `packages: read` that token cannot read packages.
+# install then authenticates to that registry for that scope alone. The jobs
+# inherit the caller's permissions: grant `contents: read` and `packages: read`,
+# and `id-token: write` only when passing `codeartifact-role`. A called
+# workflow cannot ask for more than its caller grants, so asking here for
+# `id-token: write` would stop every caller that does not grant it.
 #
 # For an AWS CodeArtifact registry the consumer passes the `codeartifact-*`
 # inputs instead of the secret; each install job then assumes
@@ -138,16 +139,8 @@ on:
             registry-token:
                 description: >-
                     Token the install authenticates to `registry-url` with. A GitHub Packages caller passes its
-                    GITHUB_TOKEN, which reads packages because this workflow grants `packages: read`.
+                    GITHUB_TOKEN, which reads packages when the caller grants `packages: read`.
                 required: false
-
-# ==============================================================================
-# PERMISSIONS
-# ==============================================================================
-permissions:
-    contents: read
-    id-token: write
-    packages: read
 
 # ==============================================================================
 # CONCURRENCY
