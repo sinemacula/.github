@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/sinemacula/.github/compare/v3.1.0...v3.2.0) (2026-11-17)
+
+
+### Features
+
+* let callers set the next release version ([#102](https://github.com/sinemacula/.github/issues/102)) ([577a46c](https://github.com/sinemacula/.github/commit/577a46ca6f3859aa460068d083bb9651cea1d0c4))
+
 ## [3.1.0](https://github.com/sinemacula/.github/compare/v3.0.3...v3.1.0) (2026-11-17)
 
 
