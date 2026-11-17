@@ -21,6 +21,9 @@
 #   - versioning-strategy  default | always-bump-patch | … (default default). Use
 #                          always-bump-patch for deployed apps so the version does
 #                          not inflate from frequent feature releases.
+#   - release-as           Force the next release's version (default unset). Set it
+#                          for a first release below 1.0.0, then remove it once
+#                          that tag exists.
 #   - use-app-token        Mint a GitHub App token instead of GITHUB_TOKEN (see Auth).
 #
 # Auth:
@@ -61,6 +64,13 @@ on:
                 type: string
                 required: false
                 default: default
+            release-as:
+                description: >-
+                    Version the next release is cut as (e.g. 0.1.0); empty leaves
+                    release-please to derive it
+                type: string
+                required: false
+                default: ''
             use-app-token:
                 description: >-
                     Mint a GitHub App token so the Release PR and release tag can trigger
@@ -118,4 +128,5 @@ jobs:
                     token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
                     release-type: ${{ inputs.release-type }}
                     versioning-strategy: ${{ inputs.versioning-strategy }}
+                    release-as: ${{ inputs.release-as }}
                     target-branch: ${{ inputs.target-branch }}
