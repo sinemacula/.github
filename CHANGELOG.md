@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.3](https://github.com/sinemacula/.github/compare/v3.0.2...v3.0.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* load the project Biome config under the shared qlty source ([#97](https://github.com/sinemacula/.github/issues/97)) ([2f88d85](https://github.com/sinemacula/.github/commit/2f88d85a38df2bf6bf3d7971312200feb25d2dc9))
+
 ## [3.0.2](https://github.com/sinemacula/.github/compare/v3.0.1...v3.0.2) (2026-11-16)
 
 
