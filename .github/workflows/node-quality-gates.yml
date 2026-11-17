@@ -394,7 +394,8 @@ jobs:
                     import crypto from 'node:crypto';
                     import path from 'node:path';
                     import { execFileSync } from 'node:child_process';
-                    const { escape, estimateScope, normalise, planScope } = await import(process.env.MUTATION_REPORTS);
+                    const { escapePath, estimateScope, normalise, planScope } =
+                        await import(process.env.MUTATION_REPORTS);
 
                     const fail = (message) => {
                         console.log(`::error::${message}`);
@@ -522,7 +523,8 @@ jobs:
                     // A leading ! would read as an exclusion, so such a path starts with ./ instead.
                     const include = bins.map((bin, index) => ({
                         shard: index + 1,
-                        mutate: bin.entries.map((entry) => escape(entry.path) + entry.text.slice(entry.path.length))
+                        mutate: bin.entries
+                            .map((entry) => escapePath(entry.path) + entry.text.slice(entry.path.length))
                             .join(','),
                     }));
                     output('empty', 'false');
@@ -1157,7 +1159,7 @@ jobs:
                     import fs from 'node:fs';
                     import path from 'node:path';
                     import { execFileSync } from 'node:child_process';
-                    const { escape, expandMutate, packFiles } = await import(process.env.MUTATION_REPORTS);
+                    const { escapePath, expandMutate, packFiles } = await import(process.env.MUTATION_REPORTS);
                     // Predicted mutation minutes per shard above which the sweep should take more shards.
                     const TARGET_MINUTES = 120;
 
@@ -1223,7 +1225,7 @@ jobs:
 
                     const include = bins.map((bin, index) => ({
                         shard: index + 1,
-                        mutate: bin.files.map(escape).join(','),
+                        mutate: bin.files.map(escapePath).join(','),
                         predicted: minutes(bin),
                     }));
                     output('matrix', JSON.stringify({ include }));

@@ -29,28 +29,31 @@ const atOrAfter = (a, b) => a.line > b.line || (a.line === b.line && a.column >=
 
 // Report columns are one-based; Stryker reads range columns as zero-based.
 const inRange = ({ start, end }, range) =>
-    atOrAfter({ line: start.line, column: start.column - 1 }, range.start)
-    && atOrAfter(range.end, { line: end.line, column: end.column - 1 });
+    atOrAfter({ line: start.line, column: start.column - 1 }, range.start) &&
+    atOrAfter(range.end, { line: end.line, column: end.column - 1 });
 
 // The plans escape magic characters as one-character classes for Stryker.
-export const unescape = (file) => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
+export const unescapePath = file => file.replace(/^\.\/!/, '!').replace(/\[([?*()[\]{}])\]/g, '$1');
 
-export const escape = (file) => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
+export const escapePath = file => file.replace(/^!/, './!').replace(/[?*()[\]{}]/g, '[$&]');
 
 // A --mutate list as each file mapped to true (the whole file) or its line ranges.
 export function parseScope(mutate) {
     const scope = new Map();
     for (const entry of mutate.split(',').filter(Boolean)) {
         const range = RANGE.exec(entry);
-        const file = normalise(unescape(range ? range[1] : entry));
+        const file = normalise(unescapePath(range ? range[1] : entry));
         const current = scope.get(file);
         if (!range) {
             scope.set(file, true);
         } else if (current !== true) {
-            scope.set(file, [...(current ?? []), {
-                start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
-                end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
-            }]);
+            scope.set(file, [
+                ...(current ?? []),
+                {
+                    start: { line: Number(range[3]), column: Number(range[4] ?? 0) },
+                    end: { line: Number(range[5]), column: Number(range[6] ?? Infinity) },
+                },
+            ]);
         }
     }
     return scope;
@@ -58,10 +61,10 @@ export function parseScope(mutate) {
 
 export const inScope = (scope, file, { location }) => {
     const ranges = scope?.get(normalise(file));
-    return ranges === true || (Array.isArray(ranges) && ranges.some((range) => inRange(location, range)));
+    return ranges === true || (Array.isArray(ranges) && ranges.some(range => inRange(location, range)));
 };
 
-const readJson = (file) => {
+const readJson = file => {
     try {
         return JSON.parse(fs.readFileSync(file, 'utf8'));
     } catch {
@@ -69,11 +72,14 @@ const readJson = (file) => {
     }
 };
 
-const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isObject = value => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const isReport = (report) => isObject(report) && isObject(report.files)
-    && Object.values(report.files).every((result) => isObject(result)
-        && (result.mutants === undefined || Array.isArray(result.mutants)));
+const isReport = report =>
+    isObject(report) &&
+    isObject(report.files) &&
+    Object.values(report.files).every(
+        result => isObject(result) && (result.mutants === undefined || Array.isArray(result.mutants)),
+    );
 
 // The report only when Stryker wrote it after the marker, so a restored or truncated one never counts.
 export function readFresh(reportPath, markerPath) {
@@ -110,26 +116,28 @@ export function collectShards(dir, prefix, shards, recordName) {
     let names = [];
     try {
         names = fs.readdirSync(dir);
-    } catch {}
+    } catch {
+        // An unreadable or missing folder holds no artifacts, so every shard is missing.
+    }
     const locate = (base, name) =>
-        [path.join(base, 'reports', name), path.join(base, name)].find((file) => fs.existsSync(file)) ?? null;
+        [path.join(base, 'reports', name), path.join(base, name)].find(file => fs.existsSync(file)) ?? null;
     const entry = (shard, base) => ({
         shard,
-        locate: (name) => locate(base, name),
-        read: (name) => {
+        locate: name => locate(base, name),
+        read: name => {
             const file = locate(base, name);
             return file && readJson(file);
         },
     });
     const found = new Map();
-    const isDir = (name) => {
+    const isDir = name => {
         try {
             return fs.statSync(path.join(dir, name)).isDirectory();
         } catch {
             return false;
         }
     };
-    if (names.some((name) => name.startsWith(prefix) && isDir(name))) {
+    if (names.some(name => name.startsWith(prefix) && isDir(name))) {
         for (const shard of shards) {
             const base = path.join(dir, `${prefix}${shard}`);
             if (fs.existsSync(base)) {
@@ -142,9 +150,12 @@ export function collectShards(dir, prefix, shards, recordName) {
         const shard = named === undefined ? (shards.length === 1 ? shards[0] : null) : named;
         found.set(shard, entry(shard, dir));
     }
-    const missing = shards.filter((shard) => !found.has(shard));
+    const missing = shards.filter(shard => !found.has(shard));
     return { found: [...found.values()], missing };
 }
+
+// The first copy of a mutant stands until a copy its shard owns replaces one it does not.
+const prefer = (current, copy) => (!current || (!current.owned && copy.owned) ? copy : current);
 
 // Unions reports by mutant and test key. A shard's own scope wins over carried copies, and a carried copy its
 // owner no longer reports is dropped as a mutant the code no longer has.
@@ -180,33 +191,33 @@ export function mergeReports(entries, scopes) {
             }
             for (const mutant of result.mutants ?? []) {
                 const key = mutantKey(normalise(file), mutant);
-                const current = entry.mutants.get(key);
-                const owned = owns(shard, file, mutant);
-                if (!current || (!current.owned && owned)) {
-                    entry.mutants.set(key, { mutant, owned, ids: idMaps[index] });
-                }
+                const copy = { mutant, owned: owns(shard, file, mutant), ids: idMaps[index] };
+                entry.mutants.set(key, prefer(entry.mutants.get(key), copy));
             }
             chosen.set(normalise(file), entry);
         }
     });
 
-    const owners = entries.map(({ shard }) => shard).filter((shard) => shard !== null);
+    const owners = entries.map(({ shard }) => shard).filter(shard => shard !== null);
     let stale = 0;
     for (const [file, entry] of chosen) {
         for (const [key, { mutant, owned }] of entry.mutants) {
-            if (!owned && owners.some((shard) => owns(shard, file, mutant))) {
+            if (!owned && owners.some(shard => owns(shard, file, mutant))) {
                 entry.mutants.delete(key);
                 stale++;
             }
         }
-        if (entry.mutants.size === 0 && !entry.owned && owners.some((shard) =>
-            scopes.get(shard)?.get(normalise(file)) === true)) {
+        if (
+            entry.mutants.size === 0 &&
+            !entry.owned &&
+            owners.some(shard => scopes.get(shard)?.get(normalise(file)) === true)
+        ) {
             chosen.delete(file);
         }
     }
 
     let count = 0;
-    const remap = (ids, list) => list?.map((id) => ids.get(id)).filter((id) => id !== undefined);
+    const remap = (ids, list) => list?.map(id => ids.get(id)).filter(id => id !== undefined);
     const files = {};
     for (const [file, { result, mutants }] of chosen) {
         files[file] = {
@@ -255,7 +266,9 @@ export function undetectedLines(report) {
     for (const [file, result] of Object.entries(report.files)) {
         for (const mutant of result.mutants ?? []) {
             if (['Survived', 'NoCoverage'].includes(mutant.status)) {
-                const replacement = String(mutant.replacement ?? '').replace(/\s+/g, ' ').slice(0, 80);
+                const replacement = String(mutant.replacement ?? '')
+                    .replace(/\s+/g, ' ')
+                    .slice(0, 80);
                 const { line, column } = mutant.location.start;
                 const { status, mutatorName } = mutant;
                 lines.push(`${normalise(file)}:${line}:${column} ${status} ${mutatorName} ${replacement}`);
@@ -308,9 +321,10 @@ export function testCosts(report) {
 // test, so each counts as the average.
 export function mutantWeight(mutant, costs = new Map()) {
     const covering = mutant.coveredBy ?? [];
-    const each = mutant.static || covering.length === 0
-        ? 1
-        : covering.reduce((sum, id) => sum + (costs.get(id) ?? 1), 0) / covering.length;
+    const each =
+        mutant.static || covering.length === 0
+            ? 1
+            : covering.reduce((sum, id) => sum + (costs.get(id) ?? 1), 0) / covering.length;
     return 1 + (mutant.testsCompleted ?? covering.length) * each;
 }
 
@@ -322,17 +336,15 @@ export function measureSweep(report, shards) {
     const lines = {};
     for (const { scope, seconds } of shards) {
         const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
-        const weighed = [];
-        for (const [file, result] of Object.entries(report.files)) {
-            for (const mutant of result.mutants ?? []) {
-                if (inScope(scope, file, mutant)) {
-                    weighed.push({ file: normalise(file), mutant, weight: mutantWeight(mutant, costs) });
-                }
-            }
-        }
+        const weighed = Object.entries(report.files).flatMap(([file, result]) =>
+            (result.mutants ?? [])
+                .filter(mutant => inScope(scope, file, mutant))
+                .map(mutant => ({ file: normalise(file), mutant, weight: mutantWeight(mutant, costs) })),
+        );
         const total = weighed.reduce((sum, { weight }) => sum + weight, 0);
+        const unweighed = total > 0 ? 0 : time / scope.size;
         for (const file of scope.keys()) {
-            files[file] = (files[file] ?? 0) + (total > 0 ? 0 : time / scope.size);
+            files[file] = (files[file] ?? 0) + unweighed;
         }
         for (const { file, mutant, weight } of total > 0 ? weighed : []) {
             const share = (weight / total) * time;
@@ -343,13 +355,18 @@ export function measureSweep(report, shards) {
             lines[file].set(line, [count + 1, sum + share]);
         }
     }
-    const listed = Object.fromEntries(Object.entries(lines).map(([file, byLine]) => [file, [...byLine]
-        .sort(([a], [b]) => a - b)
-        .map(([line, [count, sum]]) => [line, count, Math.round(sum * 1000) / 1000])]));
+    const listed = Object.fromEntries(
+        Object.entries(lines).map(([file, byLine]) => [
+            file,
+            [...byLine]
+                .sort(([a], [b]) => a - b)
+                .map(([line, [count, sum]]) => [line, count, Math.round(sum * 1000) / 1000]),
+        ]),
+    );
     return { files, lines: listed };
 }
 
-const isSeconds = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const isSeconds = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 
 // Estimated seconds for each scope entry ({ path, range, start, end }) from the last full sweep, or null when
 // there is no usable sweep. A measured file costs what it took; a range costs the larger of what its lines took
@@ -371,8 +388,11 @@ export function estimateScope(entries, history, lineCount) {
     }
     const recorded = (file, start, end) => {
         const lines = isObject(history.lines) && Array.isArray(history.lines[file]) ? history.lines[file] : [];
-        return lines.reduce((sum, line) => (Array.isArray(line) && line[0] >= start && line[0] <= end
-            && isSeconds(line[2]) ? sum + line[2] : sum), 0);
+        return lines.reduce(
+            (sum, line) =>
+                Array.isArray(line) && line[0] >= start && line[0] <= end && isSeconds(line[2]) ? sum + line[2] : sum,
+            0,
+        );
     };
     const costs = entries.map(({ path: file, range, start, end }) => {
         const count = lineCount(file) || 1;
@@ -388,17 +408,22 @@ export function estimateScope(entries, history, lineCount) {
     return costs.every(Number.isFinite) && Number.isFinite(costs.reduce((sum, cost) => sum + cost, 0)) ? costs : null;
 }
 
-const disjoint = (entries) => entries.every(({ range }) => range) && [...entries]
-    .sort((a, b) => a.start - b.start)
-    .every((entry, index, sorted) => index === 0 || entry.start > sorted[index - 1].end);
+const disjoint = entries =>
+    entries.every(({ range }) => range) &&
+    [...entries]
+        .sort((a, b) => a.start - b.start)
+        .every((entry, index, sorted) => index === 0 || entry.start > sorted[index - 1].end);
 
 // Packs units ({ key, weight }), heaviest first, onto the least loaded of `count` shards.
 export function pack(units, count) {
     const sorted = [...units].sort((a, b) => b.weight - a.weight || compare(a.key, b.key));
     const bins = Array.from({ length: Math.min(count, sorted.length) }, () => ({ weight: 0, units: [] }));
     for (const unit of sorted) {
-        const bin = bins.reduce((least, other) => (other.weight < least.weight
-            || (other.weight === least.weight && other.units.length < least.units.length) ? other : least));
+        const bin = bins.reduce((least, other) =>
+            other.weight < least.weight || (other.weight === least.weight && other.units.length < least.units.length)
+                ? other
+                : least,
+        );
         bin.weight += unit.weight;
         bin.units.push(unit);
     }
@@ -413,57 +438,58 @@ export function planScope(entries, weights, count) {
     entries.forEach((entry, index) => {
         byPath.set(entry.path, [...(byPath.get(entry.path) ?? []), { entry, weight: weights[index] }]);
     });
-    const weigh = (items) => items.reduce((sum, { weight }) => sum + weight, 0);
+    const weigh = items => items.reduce((sum, { weight }) => sum + weight, 0);
     const total = weigh([...byPath.values()].flat());
-    const units = [...byPath.keys()].sort(compare).flatMap((file) => {
+    const units = [...byPath.keys()].sort(compare).flatMap(file => {
         const items = byPath.get(file);
         return weigh(items) > total / count && items.length > 1 && disjoint(items.map(({ entry }) => entry))
             ? items.map(({ entry, weight }) => ({ key: entry.text, weight, entries: [entry] }))
             : [{ key: file, weight: weigh(items), entries: items.map(({ entry }) => entry) }];
     });
-    return pack(units, count).map((bin) => ({
+    return pack(units, count).map(bin => ({
         weight: bin.weight,
-        entries: bin.units.flatMap((unit) => unit.entries)
-            .sort((a, b) => compare(a.path, b.path) || a.start - b.start),
+        entries: bin.units.flatMap(unit => unit.entries).sort((a, b) => compare(a.path, b.path) || a.start - b.start),
     }));
 }
 
 // Stryker's `mutate` patterns as the files on disk they select, in order, as Stryker reads them: a later `!`
 // pattern drops files, and a line range keeps its whole file, since the full sweep never splits one.
 export function expandMutate(patterns, cwd = process.cwd()) {
-    const skip = (entry) => /(^|[\\/])(node_modules|\.git)$/.test(typeof entry === 'string' ? entry : entry.name);
+    const skip = entry => /(^|[\\/])(node_modules|\.git)$/.test(typeof entry === 'string' ? entry : entry.name);
+    const isFile = name => {
+        try {
+            return fs.statSync(path.join(cwd, name)).isFile();
+        } catch {
+            return false;
+        }
+    };
     const selected = new Set();
     for (const raw of patterns) {
         const text = String(raw).trim();
-        if (text === '') {
-            continue;
-        }
         const negated = text.startsWith('!');
         const body = negated ? text.slice(1) : text;
         const pattern = RANGE.exec(body)?.[1] ?? body;
         if (negated) {
-            for (const file of selected) {
-                if (path.matchesGlob(file, normalise(pattern, cwd))) {
-                    selected.delete(file);
-                }
+            const glob = normalise(pattern, cwd);
+            for (const file of [...selected].filter(name => path.matchesGlob(name, glob))) {
+                selected.delete(file);
             }
-            continue;
-        }
-        for (const file of fs.globSync(pattern, { cwd, exclude: skip })) {
-            const name = normalise(file, cwd);
-            try {
-                if (fs.statSync(path.join(cwd, name)).isFile()) {
-                    selected.add(name);
-                }
-            } catch {}
+        } else if (text !== '') {
+            const files = fs.globSync(pattern, { cwd, exclude: skip }).map(file => normalise(file, cwd));
+            for (const file of files.filter(isFile)) {
+                selected.add(file);
+            }
         }
     }
     return [...selected].sort();
 }
 
 // Packs whole files, heaviest first, onto the least loaded of `count` shards.
-export const packFiles = (weights, count) => pack([...weights].map(([key, weight]) => ({ key, weight })), count)
-    .map((bin) => ({ weight: bin.weight, files: bin.units.map(({ key }) => key).sort(compare) }));
+export const packFiles = (weights, count) =>
+    pack(
+        [...weights].map(([key, weight]) => ({ key, weight })),
+        count,
+    ).map(bin => ({ weight: bin.weight, files: bin.units.map(({ key }) => key).sort(compare) }));
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
     const [command, ...args] = process.argv.slice(2);

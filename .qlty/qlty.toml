@@ -51,3 +51,7 @@ drivers = [
 
 [[plugin]]
 name = "trufflehog"
+
+[[plugin]]
+name = "biome"
+version = "2.5.6"
