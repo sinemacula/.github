@@ -1,0 +1,33 @@
+# ==============================================================================
+# COMPOSITE ACTION: Coverage gate
+# ==============================================================================
+name: Coverage gate
+description: Fail when a clover report leaves any statement uncovered, listing each uncovered line
+
+inputs:
+    file:
+        description: Path to the clover XML report
+        required: false
+        default: clover.xml
+
+runs:
+    using: composite
+    steps:
+        -   name: Check line coverage
+            shell: bash
+            env:
+                CLOVER_FILE: ${{ inputs.file }}
+            run: |
+                php -r '
+                    $clover = @simplexml_load_file(getenv("CLOVER_FILE"));
+                    if ($clover === false) {
+                        fwrite(STDERR, "Cannot read the clover report.\n");
+                        exit(1);
+                    }
+                    foreach ($clover->xpath("//file/line[@type=\"stmt\"][@count=\"0\"]") as $line) {
+                        echo $line->xpath("..")[0]["name"], ":", $line["num"], "\n";
+                    }
+                    $m = $clover->project->metrics;
+                    echo "Lines covered: {$m["coveredstatements"]}/{$m["statements"]}\n";
+                    exit((int) $m["coveredstatements"] < (int) $m["statements"] ? 1 : 0);
+                '
