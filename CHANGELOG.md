@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/sinemacula/.github/compare/v3.0.3...v3.1.0) (2026-11-17)
+
+
+### Features
+
+* add a coverage gate action that fails on any uncovered line ([#100](https://github.com/sinemacula/.github/issues/100)) ([a4ec5e0](https://github.com/sinemacula/.github/commit/a4ec5e0e9807c6d84be9a720cebafeff5b61d1af))
+
 ## [3.0.3](https://github.com/sinemacula/.github/compare/v3.0.2...v3.0.3) (2026-11-17)
 
 
