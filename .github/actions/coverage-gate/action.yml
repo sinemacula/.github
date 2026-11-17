@@ -2,7 +2,7 @@
 # COMPOSITE ACTION: Coverage gate
 # ==============================================================================
 name: Coverage gate
-description: Fail when a clover report leaves any statement uncovered, listing each uncovered line
+description: Fail when a clover report leaves any statement uncovered, listing each line no test ran
 
 inputs:
     file:
@@ -24,7 +24,7 @@ runs:
                         fwrite(STDERR, "Cannot read the clover report.\n");
                         exit(1);
                     }
-                    foreach ($clover->xpath("//file/line[@type=\"stmt\"][@count=\"0\"]") as $line) {
+                    foreach ($clover->xpath("//file/line[@count=\"0\"]") as $line) {
                         echo $line->xpath("..")[0]["name"], ":", $line["num"], "\n";
                     }
                     $m = $clover->project->metrics;
